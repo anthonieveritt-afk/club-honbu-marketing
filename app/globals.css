@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html, body {
+  background-color: #FAF7F2;
+  color: #0A0A0A;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: #0066cc;
+  color: #fff;
+}
+
+@layer components {
+  .btn-pill {
+    @apply inline-flex items-center justify-center rounded-full px-6 py-3 text-sm font-medium transition-all duration-200;
+  }
+  .btn-primary {
+    @apply btn-pill bg-ink text-white hover:bg-black/85;
+  }
+  .btn-accent {
+    @apply btn-pill bg-accent text-white hover:bg-accent/90;
+  }
+  .btn-ghost {
+    @apply btn-pill border border-line text-ink hover:bg-black/[0.04];
+  }
+  .container-page {
+    @apply mx-auto w-full max-w-page px-6 md:px-10;
+  }
+  .wordmark {
+    @apply font-sans font-semibold tracking-tight;
+    letter-spacing: -0.02em;
+  }
+}
