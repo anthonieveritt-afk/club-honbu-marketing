@@ -10,13 +10,13 @@ export default function Home() {
         {/* HERO */}
         <section className="container-page pt-20 pb-24 md:pt-32 md:pb-36">
           <p className="text-sm text-accent font-medium tracking-wide mb-6">
-            Built by an instructor, for instructors.
+            Built by instructors, for clubs.
           </p>
           <h1 className="text-5xl md:text-7xl lg:text-[5.5rem] font-semibold tracking-tight leading-[1.02] max-w-5xl">
-            Run your dojo like the&nbsp;rest of your life depends on it.
+            Run your club like the&nbsp;rest of your life depends on it.
           </h1>
           <p className="mt-8 text-xl md:text-2xl text-muted max-w-2xl leading-relaxed">
-            Members, gradings, attendance, and payments — in one place. So your evenings go back to teaching, not chasing spreadsheets.
+            Members, attendance, progression, and payments — in one place. Whether you run a dojo, a football squad, or anything in between, your evenings go back to coaching, not chasing spreadsheets.
           </p>
           <div className="mt-10 flex flex-wrap items-center gap-5">
             <a href="#pricing" className="btn-accent px-7 py-3.5 text-base">
@@ -35,10 +35,10 @@ export default function Home() {
         <section className="border-y border-line bg-black/[0.02]">
           <div className="container-page py-24 md:py-32">
             <h2 className="text-3xl md:text-5xl font-semibold tracking-tight max-w-3xl leading-tight">
-              You didn't become an instructor to&nbsp;become an admin.
+              You didn't start a club to&nbsp;become an admin.
             </h2>
             <p className="mt-8 text-lg md:text-xl text-muted max-w-2xl leading-relaxed">
-              But here you are. Tracking gradings on a clipboard. Chasing standing orders. Squinting at a spreadsheet that breaks every time a kid moves up a belt. The owner-operator trap is real — and it's eating the hours you should be on the mat.
+              But here you are. Tracking gradings, squad lists, or attendance on a clipboard. Chasing standing orders. Squinting at a spreadsheet that breaks every time someone moves up a belt or changes age group. The owner-operator trap is real — and it's eating the hours you should be on the mat or the pitch.
             </p>
           </div>
         </section>
@@ -55,22 +55,22 @@ export default function Home() {
                 icon: (
                   <path d="M3 21v-2a4 4 0 0 1 4-4h6a4 4 0 0 1 4 4v2M10 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" />
                 ),
-                title: "Members & gradings",
-                body: "Track every student's journey — belt history, attendance, syllabus progress. From white belt to black, the record is yours forever.",
+                title: "Members & progression",
+                body: "Track every member's journey — belts, age groups, attendance, syllabus or training progress. From sign-up to senior, the record is yours forever.",
               },
               {
                 icon: (
                   <path d="M3 7h18M3 12h18M3 17h12M19 17h2" />
                 ),
                 title: "Payments & billing",
-                body: "Recurring monthly fees, one-off course payments, grading fees. Auto-charged, reconciled, and chased for you. No more awkward conversations.",
+                body: "Recurring monthly fees, one-off course payments, grading or kit fees. Auto-charged, reconciled, and chased for you. No more awkward conversations.",
               },
               {
                 icon: (
                   <path d="M3 3v18h18M7 14l4-4 4 4 5-7" />
                 ),
                 title: "Insights",
-                body: "See at a glance which students are slipping in attendance — and reach out before they quietly drop off the books.",
+                body: "See at a glance which members are slipping in attendance — and reach out before they quietly drop off the books.",
               },
             ].map((f, i) => (
               <div key={i}>
@@ -92,7 +92,7 @@ export default function Home() {
             <div className="max-w-3xl">
               <p className="text-sm text-accent font-medium tracking-wide mb-6">A note from the founders</p>
               <blockquote className="text-2xl md:text-3xl font-medium tracking-tight leading-snug">
-                "We built Club Honbu because we needed it. We run a karate club, and every Sunday night we'd sit at the kitchen table sorting payment receipts and pencilling in grading dates on a printed register. The software out there was either built for big-box gyms or felt like a hobby project. So we made the thing we wished existed — for our club, and for yours."
+                "We built Club Honbu because we needed it. We run a karate club, and every Sunday night we'd sit at the kitchen table sorting payment receipts and pencilling in grading dates on a printed register. The software out there was either built for big-box gyms or felt like a hobby project. So we made the thing we wished existed — first for our dojo, then for the football coach down the road, and now for any club that teaches."
               </blockquote>
               <p className="mt-8 text-muted">
                 — Anthoni & Jade, founders of Club Honbu
@@ -116,7 +116,7 @@ export default function Home() {
               {
                 name: "Starter",
                 price: "£39",
-                blurb: "For a single instructor running one class or a small club.",
+                blurb: "For a single coach or instructor running one group or a small club.",
                 bullets: ["Up to 50 active members", "Single instructor account", "Recurring & one-off payments", "Attendance tracking"],
                 cta: "Start free trial",
                 highlight: false,
@@ -124,16 +124,16 @@ export default function Home() {
               {
                 name: "Club",
                 price: "£79",
-                blurb: "For most clubs. Multiple instructors, full grading workflow, reporting.",
-                bullets: ["Up to 250 active members", "Multiple instructors", "Full gradings & belt history", "Reports & member insights", "Email reminders & invoices"],
+                blurb: "For most clubs. Multiple coaches, full progression workflow, reporting.",
+                bullets: ["Up to 250 active members", "Multiple coaches & instructors", "Gradings, squads & progression history", "Reports & member insights", "Email reminders & invoices"],
                 cta: "Start free trial",
                 highlight: true,
               },
               {
                 name: "Association",
                 price: "£159",
-                blurb: "For multi-club associations and federations running several dojos.",
-                bullets: ["Unlimited members", "Multi-club / multi-dojo", "White-label branding", "Priority support", "Custom reporting", "Onboarding session"],
+                blurb: "For multi-club associations and federations running several sites.",
+                bullets: ["Unlimited members", "Multi-club / multi-site", "White-label branding", "Priority support", "Custom reporting", "Onboarding session"],
                 cta: "Start free trial",
                 highlight: false,
               },
@@ -204,12 +204,12 @@ export default function Home() {
           <Accordion
             items={[
               {
-                q: "Which martial arts is it for?",
-                a: "Club Honbu is built for striking and grappling clubs alike — karate, BJJ, MMA, boxing, kickboxing, judo, taekwondo. If you teach in classes, run gradings, and bill members, it'll fit.",
+                q: "What kinds of clubs is it for?",
+                a: "Club Honbu works for martial arts (karate, BJJ, MMA, boxing, kickboxing, judo, taekwondo) and general sports clubs (football, netball, rugby, dance, gymnastics). If you teach in groups, track progression, and bill members, it'll fit. You pick your club type at setup and the labels follow — belts and gradings for martial arts, squads and matches for sport.",
               },
               {
                 q: "Do I need to be technical to set this up?",
-                a: "No. If you can use email and a spreadsheet, you can run Club Honbu. Setup takes about 20 minutes — add your classes, import your members, and you're live.",
+                a: "No. If you can use email and a spreadsheet, you can run Club Honbu. Setup takes about 20 minutes — pick your club type, add your groups, import your members, and you're live.",
               },
               {
                 q: "Can I migrate from spreadsheets?",
@@ -238,7 +238,7 @@ export default function Home() {
               Get your evenings back.
             </h2>
             <p className="mt-6 text-lg md:text-xl text-canvas/70 max-w-xl mx-auto">
-              Try Club Honbu free for 14 days. No card. No commitment. Just your club, finally on rails.
+              Try Club Honbu free for 14 days. No card. No commitment. Just your club — dojo, pitch or otherwise — finally on rails.
             </p>
             <div className="mt-10 flex flex-wrap items-center justify-center gap-5">
               <a
