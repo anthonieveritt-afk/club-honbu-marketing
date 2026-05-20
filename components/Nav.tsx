@@ -9,13 +9,13 @@ export function Nav() {
           <Wordmark />
         </Link>
         <nav className="hidden md:flex items-center gap-8 text-sm text-ink/80">
-          <a href="#features" className="hover:text-ink transition-colors">Features</a>
-          <a href="#pricing" className="hover:text-ink transition-colors">Pricing</a>
-          <a href="#faq" className="hover:text-ink transition-colors">FAQ</a>
+          <a href="/#features" className="hover:text-ink transition-colors">Features</a>
+          <a href="/#pricing" className="hover:text-ink transition-colors">Pricing</a>
+          <a href="/#faq" className="hover:text-ink transition-colors">FAQ</a>
         </nav>
-        <a href="#pricing" className="btn-primary text-sm px-5 py-2.5">
-          Start free trial
-        </a>
+        <Link href="/get-started" className="btn-accent text-sm px-5 py-2.5">
+          Get Started
+        </Link>
       </div>
     </header>
   );

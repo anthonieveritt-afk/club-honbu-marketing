@@ -19,7 +19,7 @@ export default function Home() {
             Members, attendance, progression, and payments — in one place. Whether you run a dojo, a football squad, or anything in between, your evenings go back to coaching, not chasing spreadsheets.
           </p>
           <div className="mt-10 flex flex-wrap items-center gap-5">
-            <a href="#pricing" className="btn-accent px-7 py-3.5 text-base">
+            <a href="/get-started" className="btn-accent px-7 py-3.5 text-base">
               Start your 14-day free trial
             </a>
             <a href="#features" className="text-base text-ink/80 hover:text-ink underline-offset-4 hover:underline">
@@ -178,7 +178,7 @@ export default function Home() {
                   ))}
                 </ul>
                 <a
-                  href="mailto:hello@clubhonbu.co.uk?subject=Club%20Honbu%20trial"
+                  href="/get-started"
                   className={`mt-8 btn-pill text-sm ${
                     tier.highlight
                       ? "bg-canvas text-ink hover:bg-white"
@@ -242,7 +242,7 @@ export default function Home() {
             </p>
             <div className="mt-10 flex flex-wrap items-center justify-center gap-5">
               <a
-                href="mailto:hello@clubhonbu.co.uk?subject=Club%20Honbu%20trial"
+                href="/get-started"
                 className="btn-pill bg-accent text-white hover:bg-accent/90 px-7 py-3.5 text-base"
               >
                 Start your 14-day free trial
