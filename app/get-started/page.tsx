@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { Nav } from "@/components/Nav";
 import { Footer } from "@/components/Footer";
 import { submitSignup, type SignupState } from "@/app/actions/signup";
@@ -25,6 +25,12 @@ function FieldError({ message }: { message?: string }) {
 export default function GetStartedPage() {
   const [state, setState] = useState<SignupState>({ status: "idle" });
   const [isPending, startTransition] = useTransition();
+  const loadedAt = useRef<number>(0);
+  const [company, setCompany] = useState(""); // honeypot
+
+  useEffect(() => {
+    loadedAt.current = Date.now();
+  }, []);
 
   const [form, setForm] = useState({
     clubName: "",
@@ -49,7 +55,11 @@ export default function GetStartedPage() {
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     startTransition(async () => {
-      const result = await submitSignup(form);
+      const result = await submitSignup({
+        ...form,
+        company,
+        elapsedMs: loadedAt.current ? Date.now() - loadedAt.current : undefined,
+      });
       setState(result);
       if (result.status === "success") {
         window.scrollTo({ top: 0, behavior: "smooth" });
@@ -71,7 +81,7 @@ export default function GetStartedPage() {
               Get started with Club&nbsp;Honbu
             </h1>
             <p className="mt-5 text-lg md:text-xl text-muted max-w-lg mx-auto leading-relaxed">
-              Tell us about your club and we'll have your account ready within 24 hours.
+              Tell us about your club and we'll set up your account and email your login details.
             </p>
           </div>
 
@@ -85,15 +95,36 @@ export default function GetStartedPage() {
                   {/* Global error */}
                   {state.status === "error" && !Object.keys(fieldErrors).length && (
                     <div className="rounded-xl bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
-                      Something went wrong — please email{" "}
-                      <a
-                        href="mailto:hello@clubhonbu.co.uk"
-                        className="underline underline-offset-2"
-                      >
-                        hello@clubhonbu.co.uk
-                      </a>
+                      {state.message || (
+                        <>
+                          Something went wrong — please email{" "}
+                          <a
+                            href="mailto:hello@clubhonbu.co.uk"
+                            className="underline underline-offset-2"
+                          >
+                            hello@clubhonbu.co.uk
+                          </a>
+                        </>
+                      )}
                     </div>
                   )}
+
+                  {/* Honeypot: hidden from people and screen readers; bots tend to fill it. */}
+                  <div
+                    aria-hidden="true"
+                    style={{ position: "absolute", left: "-10000px", top: "auto", width: 1, height: 1, overflow: "hidden" }}
+                  >
+                    <label htmlFor="company">Company (leave blank)</label>
+                    <input
+                      id="company"
+                      name="company"
+                      type="text"
+                      tabIndex={-1}
+                      autoComplete="off"
+                      value={company}
+                      onChange={(e) => setCompany(e.target.value)}
+                    />
+                  </div>
 
                   {/* Club Name */}
                   <div>
@@ -209,7 +240,7 @@ export default function GetStartedPage() {
                     />
                     <FieldError message={fieldErrors.adminUsername} />
                     <p className="mt-1.5 text-sm text-muted">
-                      You'll use this to log in to your dashboard.
+                      You'll use this (in lower case) to log in to your dashboard.
                     </p>
                   </div>
 
@@ -258,10 +289,18 @@ export default function GetStartedPage() {
                       disabled={isPending}
                       className="w-full btn-accent px-6 py-3.5 text-base disabled:opacity-60 disabled:cursor-not-allowed"
                     >
-                      {isPending ? "Submitting…" : "Create my account →"}
+                      {isPending ? "Submitting…" : "Request my account →"}
                     </button>
                     <p className="mt-3 text-center text-sm text-muted">
                       14-day free trial · No card required · Cancel anytime
+                    </p>
+                    <p className="mt-3 text-center text-xs text-muted">
+                      We use these details only to set up your Club Honbu account and contact you
+                      about it. Your password is stored encrypted (hashed). See our{" "}
+                      <a href="/privacy" className="underline underline-offset-2">
+                        privacy notice
+                      </a>
+                      .
                     </p>
                   </div>
                 </form>
@@ -296,11 +335,11 @@ function SuccessCard({ clubName }: { clubName: string }) {
         </svg>
       </div>
       <h2 className="text-2xl md:text-3xl font-semibold tracking-tight mb-3">
-        You're on the list!
+        Thanks — we've got it
       </h2>
       <p className="text-muted leading-relaxed max-w-sm mx-auto">
-        We're setting up{" "}
-        <strong className="text-ink">{clubName}</strong>'s account. Check your inbox — you'll hear from us within 24 hours.
+        We've received the sign-up for{" "}
+        <strong className="text-ink">{clubName}</strong>. We'll email your login details shortly.
       </p>
       <div className="mt-8 pt-6 border-t border-line">
         <p className="text-sm text-muted">

@@ -59,7 +59,7 @@ components/
 1. Push the repo to GitHub.
 2. Import into Vercel, framework auto-detects.
 3. Add `clubhonbu.co.uk` as a domain. Add `clubhonbu.com` and set it to permanent (308) redirect to the apex.
-4. No env vars required.
+4. Env vars for sign-up capture: see "Sign-ups" below. Without them the rest of the site still works.
 
 Railway also works fine if preferred — point at the repo, it'll detect Next and build.
 
@@ -75,6 +75,39 @@ Railway also works fine if preferred — point at the repo, it'll detect Next an
 - OG image / favicon set.
 - Real screenshots / product visuals (currently text-only — no fake product mockups shipped).
 - Analytics (Plausible / Vercel Analytics).
-- Trial signup flow — currently the CTAs `mailto:` `hello@clubhonbu.co.uk`. Wire to real signup when the app exists.
 - Cookie banner if/when analytics or 3rd-party scripts get added.
 - Sitemap + robots.txt.
+
+## Sign-ups (`/get-started`)
+
+`app/actions/signup.ts` validates the form, then:
+
+1. **Stores** it in Postgres table `club_signups` (`db/schema.sql`, created automatically on first
+   use). The password is stored only as a bcrypt hash (bcryptjs, cost 12, same format the
+   club-honbu app's admin login checks), never in plain text, never emailed or logged.
+2. **Emails a notification** (no password) to `SIGNUP_NOTIFY_TO` via Resend, if `RESEND_API_KEY` is set.
+3. Emails the club a confirmation only when `RESEND_FROM` is set (i.e. clubhonbu.co.uk is verified in Resend).
+
+The form only reports success if the sign-up was stored or the notification was sent; otherwise it
+asks the person to try again or email hello@clubhonbu.co.uk.
+
+Abuse protection: hidden honeypot field, a 3-second minimum fill time (both silently dropped), and
+rate limits per salted IP hash (5/hour) and per email (3/day) using the `signup_attempts` table.
+
+**`/admin/signups`**: read-only list, newest first, behind HTTP Basic auth. Returns 404 unless
+`ADMIN_PASSWORD` (12+ chars) is set. Interim until the Club Honbu HQ CRM replaces it.
+
+| Env var | Required | Purpose |
+|---|---|---|
+| `DATABASE_URL` (or `POSTGRES_URL`) | yes | Postgres connection string (Neon via Vercel Marketplace, or Railway) |
+| `ADMIN_PASSWORD` | yes, for /admin | Basic-auth password (12+ chars) |
+| `ADMIN_USERNAME` | no | Basic-auth username, default `admin` |
+| `RESEND_API_KEY` | recommended | Notification emails |
+| `SIGNUP_NOTIFY_TO` | no | Default `anthonieveritt@gmail.com` |
+| `RESEND_FROM` | after domain verification | e.g. `Club Honbu <hello@clubhonbu.co.uk>`; until set, notifications use `onboarding@resend.dev` (only delivers to the Resend account owner's address) and no confirmation goes to clubs |
+| `SIGNUP_HASH_SALT` | recommended | Random string used to hash IPs |
+| `SITE_URL` | no | Default `https://clubhonbu.co.uk` (link in the notification) |
+| `PG_SSL_NO_VERIFY` | no | `1` only if the DB proxy uses a self-signed cert |
+| `SIGNUP_LIMIT_PER_IP_HOUR` / `SIGNUP_LIMIT_PER_EMAIL_DAY` | no | Override rate limits (5 / 3) |
+
+Test (real Postgres + Chrome): see the header of `scripts/test-signup-capture.mjs`, then `pnpm test:signup`.
