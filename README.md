@@ -94,8 +94,18 @@ asks the person to try again or email hello@clubhonbu.co.uk.
 Abuse protection: hidden honeypot field, a 3-second minimum fill time (both silently dropped), and
 rate limits per salted IP hash (5/hour) and per email (3/day) using the `signup_attempts` table.
 
-**`/admin/signups`**: read-only list, newest first, behind HTTP Basic auth. Returns 404 unless
+**`/admin/signups`**: list, newest first, behind HTTP Basic auth. Returns 404 unless
 `ADMIN_PASSWORD` (12+ chars) is set. Interim until the Club Honbu HQ CRM replaces it.
+Actions (server actions, same Basic auth, re-checked):
+* **Approve** (with a subdomain, pre-filled from the club name) → status `approved` + one row in
+  `provisioning_jobs` (idempotent: a double click cannot queue a second job).
+* **Reject** (optional internal reason) → status `rejected`, stored password hash cleared, a queued
+  job is cancelled.
+* **Retry provisioning** for a `failed` job.
+
+The website never calls Railway or Cloudflare. The provisioning worker in [`worker/`](worker/README.md)
+polls `provisioning_jobs` and builds the club's trial instance, then sets the sign-up to
+`trial_active` with its URL.
 
 | Env var | Required | Purpose |
 |---|---|---|
@@ -111,3 +121,5 @@ rate limits per salted IP hash (5/hour) and per email (3/day) using the `signup_
 | `SIGNUP_LIMIT_PER_IP_HOUR` / `SIGNUP_LIMIT_PER_EMAIL_DAY` | no | Override rate limits (5 / 3) |
 
 Test (real Postgres + Chrome): see the header of `scripts/test-signup-capture.mjs`, then `pnpm test:signup`.
+Approval flow end to end (local DB, worker with fake Railway/Cloudflare): `scripts/test-hq-approval.mjs`.
+Worker unit/integration tests: `cd worker && npm test`.
