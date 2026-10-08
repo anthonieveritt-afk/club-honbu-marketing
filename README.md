@@ -102,6 +102,15 @@ Actions (server actions, same Basic auth, re-checked):
 * **Reject** (optional internal reason) → status `rejected`, stored password hash cleared, a queued
   job is cancelled.
 * **Retry provisioning** for a `failed` job.
+* **Extend trial** (1–60 days), **Mark converted** (never removed), **Delete now** (type the
+  subdomain to confirm), **Retry removal** / **Retry instance update** — see
+  [`docs/trial-lifecycle.md`](docs/trial-lifecycle.md).
+
+With `AUTO_APPROVE_SIGNUPS=1` new sign-ups are approved automatically with a unique subdomain from
+the club name (`my-dojo`, `my-dojo-2`, …), capped by `AUTO_APPROVE_MAX_PER_DAY` (default 20);
+anything unusual falls back to manual Approve. The trial is 7 days, then 7 days read-only, then the
+club is removed — the full lifecycle, env vars, a staging end-to-end test and rollback are in
+[`docs/trial-lifecycle.md`](docs/trial-lifecycle.md).
 
 The website never calls Railway or Cloudflare. The provisioning worker in [`worker/`](worker/README.md)
 polls `provisioning_jobs` and builds the club's trial instance, then sets the sign-up to
@@ -119,7 +128,11 @@ polls `provisioning_jobs` and builds the club's trial instance, then sets the si
 | `SITE_URL` | no | Default `https://clubhonbu.co.uk` (link in the notification) |
 | `PG_SSL_NO_VERIFY` | no | `1` only if the DB proxy uses a self-signed cert |
 | `SIGNUP_LIMIT_PER_IP_HOUR` / `SIGNUP_LIMIT_PER_EMAIL_DAY` | no | Override rate limits (5 / 3) |
+| `AUTO_APPROVE_SIGNUPS` | no | `1` = approve sign-ups automatically (default off) |
+| `AUTO_APPROVE_MAX_PER_DAY` | no | Daily cap for auto-approval, default 20 |
+| `TRIAL_DAYS` / `TRIAL_GRACE_DAYS` / `BASE_DOMAIN` | no | Display on /admin only; keep equal to the worker's (7 / 7 / clubhonbu.co.uk) |
 
 Test (real Postgres + Chrome): see the header of `scripts/test-signup-capture.mjs`, then `pnpm test:signup`.
 Approval flow end to end (local DB, worker with fake Railway/Cloudflare): `scripts/test-hq-approval.mjs`.
+Trial lifecycle end to end (auto-approve → reminders → expiry → extend/convert → teardown): `scripts/test-trial-lifecycle.mjs`.
 Worker unit/integration tests: `cd worker && npm test`.

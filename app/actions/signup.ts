@@ -3,7 +3,7 @@
 import { headers } from "next/headers";
 import bcrypt from "bcryptjs";
 import { getPool } from "@/lib/db";
-import { checkRateLimit, hashIp, insertSignup, markNotified } from "@/lib/signups";
+import { autoApproveEnabled, autoApproveSignup, checkRateLimit, hashIp, insertSignup, markNotified } from "@/lib/signups";
 
 export type SignupState =
   | { status: "idle" }
@@ -192,6 +192,19 @@ export async function submitSignup(data: SignupFormData): Promise<SignupState> {
     console.error("[signup] DATABASE_URL not set: sign-up cannot be stored.");
   }
 
+  // AUTO_APPROVE_SIGNUPS=1: approve straight away so the worker builds the trial club now.
+  // Any problem leaves the sign-up "new" for manual approval; the person still sees success.
+  let autoApproved: string | null = null;
+  if (signupId && autoApproveEnabled()) {
+    try {
+      const r = await autoApproveSignup(signupId, data.clubName);
+      if (r.ok) autoApproved = r.message;
+      else console.warn(`[signup] auto-approve skipped for #${signupId}: ${r.error}`);
+    } catch (err) {
+      console.error(`[signup] auto-approve failed for #${signupId}:`, err);
+    }
+  }
+
   // Notify Club Honbu (never includes the password).
   const siteUrl = process.env.SITE_URL || "https://clubhonbu.co.uk";
   const internalHtml = `
@@ -206,12 +219,12 @@ export async function submitSignup(data: SignupFormData): Promise<SignupState> {
     </table>
     <p style="font-family:sans-serif;font-size:14px;">${
       signupId
-        ? `Saved. View all sign-ups: <a href="${siteUrl}/admin/signups">${siteUrl}/admin/signups</a>`
+        ? `Saved.${autoApproved ? ` <strong>${escapeHtml(autoApproved)}</strong>: the trial club is being built now.` : ""} View all sign-ups: <a href="${siteUrl}/admin/signups">${siteUrl}/admin/signups</a>`
         : `<strong>NOT saved to the database</strong> (${storeError ? "database error" : "DATABASE_URL not set"}). This email is the only record; the chosen password was not kept.`
     }</p>
     <p style="margin-top:16px;color:#5C5C5C;font-size:12px;">Submitted via clubhonbu.co.uk/get-started</p>
   `;
-  const internalText = `New Club Honbu sign-up${signupId ? ` #${signupId}` : ""}\n\nClub: ${data.clubName}\nSport: ${data.sportType}\nContact: ${data.contactName}\nEmail: ${data.email}\nWebsite: ${data.website || "—"}\nUsername: ${data.adminUsername}\n\n${signupId ? `Saved. ${siteUrl}/admin/signups` : "NOT saved to the database. This email is the only record."}\n`;
+  const internalText = `New Club Honbu sign-up${signupId ? ` #${signupId}` : ""}\n\nClub: ${data.clubName}\nSport: ${data.sportType}\nContact: ${data.contactName}\nEmail: ${data.email}\nWebsite: ${data.website || "—"}\nUsername: ${data.adminUsername}\n\n${signupId ? `Saved.${autoApproved ? ` ${autoApproved}: the trial club is being built now.` : ""} ${siteUrl}/admin/signups` : "NOT saved to the database. This email is the only record."}\n`;
 
   const notifyResult = await sendEmail({
     to: NOTIFY_TO(),
@@ -241,13 +254,13 @@ export async function submitSignup(data: SignupFormData): Promise<SignupState> {
     const confirmHtml = `
       <div style="font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;max-width:520px;margin:0 auto;color:#0A0A0A;">
         <h1 style="font-size:24px;font-weight:600;margin-bottom:8px;">Thanks, ${escapeHtml(data.contactName)}.</h1>
-        <p style="color:#5C5C5C;margin-bottom:24px;">We've received your Club Honbu sign-up for <strong>${escapeHtml(data.clubName)}</strong>. We'll set up your account and email your login details shortly.</p>
+        <p style="color:#5C5C5C;margin-bottom:24px;">We've received your Club Honbu sign-up for <strong>${escapeHtml(data.clubName)}</strong>. We'll set up your account and email your login details shortly. Your 7-day free trial starts when your club is ready.</p>
         <p style="color:#5C5C5C;">If you have any questions in the meantime, just reply to this email.</p>
         <hr style="border:none;border-top:1px solid #E8E2D7;margin:28px 0;" />
         <p style="font-size:12px;color:#5C5C5C;">Club Honbu · <a href="https://clubhonbu.co.uk" style="color:#0066cc;">clubhonbu.co.uk</a></p>
       </div>
     `;
-    const confirmText = `Hi ${data.contactName},\n\nThanks — we've received your Club Honbu sign-up for ${data.clubName}. We'll set up your account and email your login details shortly.\n\nIf you have any questions, just reply to this email.\n\n— The Club Honbu team\nhttps://clubhonbu.co.uk`;
+    const confirmText = `Hi ${data.contactName},\n\nThanks — we've received your Club Honbu sign-up for ${data.clubName}. We'll set up your account and email your login details shortly. Your 7-day free trial starts when your club is ready.\n\nIf you have any questions, just reply to this email.\n\n— The Club Honbu team\nhttps://clubhonbu.co.uk`;
     const confirmResult = await sendEmail({
       to: data.email,
       subject: `We've received your Club Honbu sign-up`,

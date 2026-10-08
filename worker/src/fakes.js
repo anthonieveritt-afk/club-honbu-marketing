@@ -96,6 +96,35 @@ export function createFakeRailway({ fail, deployOutcome = ["BUILDING", "DEPLOYIN
       const d = s.deployments.find((x) => x.id === did);
       return d ? { id: d.id, status: statusOf(d) } : null;
     },
+    async getVariables({ serviceId }) {
+      call("getVariables", { serviceId });
+      if (!s.services.find((x) => x.id === serviceId)) throw new Error(`Service ${serviceId} not found`);
+      return { ...(s.variables[serviceId] || {}) };
+    },
+    async deleteVariable({ serviceId, name }) {
+      call("deleteVariable", { serviceId, name });
+      const v = s.variables[serviceId] || {};
+      if (!(name in v)) throw new Error(`Variable ${name} not found`);
+      delete v[name];
+    },
+    async redeploy(a) { call("redeploy", a); s.redeploys = (s.redeploys || 0) + 1; },
+    async deleteCustomDomain(cid) {
+      const f = call("deleteCustomDomain", { id: cid });
+      const i = s.customDomains.findIndex((d) => d.id === cid);
+      if (i < 0) throw new Error(`Custom domain ${cid} not found`);
+      s.customDomains.splice(i, 1);
+      if (f === "throw-after-create") throw new Error("timeout (custom domain was deleted)");
+    },
+    async deleteService({ id: sid, environmentId }) {
+      const f = call("deleteService", { id: sid, environmentId });
+      const i = s.services.findIndex((x) => x.id === sid);
+      if (i < 0) throw new Error(`Service ${sid} not found`);
+      s.services.splice(i, 1);
+      s.domains = s.domains.filter((d) => d.serviceId !== sid);
+      s.customDomains = s.customDomains.filter((d) => d.serviceId !== sid);
+      delete s.variables[sid];
+      if (f === "throw-after-create") throw new Error("socket hang up (service was deleted)");
+    },
   };
 }
 
@@ -117,6 +146,14 @@ export function createFakeCloudflare({ fail, existing = [], log } = {}) {
       return r;
     },
     async updateRecord(id, rec) { call("updateRecord", { id, ...rec }); Object.assign(s.records.find((r) => r.id === id), rec); },
+    async deleteRecord(id) {
+      const f = call("deleteRecord", { id });
+      const i = s.records.findIndex((r) => r.id === id);
+      if (i < 0) throw new Error(`81044 Record ${id} does not exist`);
+      s.records.splice(i, 1);
+      if (f === "throw-after-create") throw new Error("timeout (record was deleted)");
+      return { id };
+    },
   };
 }
 
@@ -132,6 +169,17 @@ export function createFakeTenantDb({ fail, log } = {}) {
       if (s.databases.has(dbName)) return false;
       s.databases.set(dbName, { roleName, password });
       return true;
+    },
+    async inspect({ dbName }) {
+      s.calls.push({ name: "inspect", args: { dbName } });
+      return { database: s.databases.has(dbName), role: s.databases.has(dbName) };
+    },
+    async dropDatabase({ dbName, roleName }) {
+      s.calls.push({ name: "dropDatabase", args: { dbName, roleName } });
+      log?.(`tenantDb.dropDatabase ${dbName} (role ${roleName})`);
+      const f = nextFail("dropDatabase"); if (f) throw f;
+      const had = s.databases.delete(dbName);
+      return { droppedDb: had, droppedRole: had };
     },
   };
 }

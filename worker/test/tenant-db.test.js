@@ -31,3 +31,33 @@ test("real tenant DB: creates role + database once, isolates it, idempotent on r
     await admin.end();
   }
 });
+
+test("real tenant DB: dropDatabase removes the club DB + role, is idempotent, refuses anything else", async () => {
+  const dbName = `club_droptest_${process.pid}`;
+  const roleName = `${dbName}_app`;
+  const t = createTenantDb({ adminUrl: ADMIN_URL });
+  const admin = new pg.Client({ connectionString: ADMIN_URL });
+  await admin.connect();
+  try {
+    await t.ensureDatabase({ dbName, roleName, password: "Abc123def456ghi789jkl012" });
+    // an open connection from the "club app" must not block the drop
+    const app = new pg.Client({ connectionString: tenantDatabaseUrl({ appHost: "127.0.0.1:5544", dbName, roleName, password: "Abc123def456ghi789jkl012" }) });
+    await app.connect();
+    app.on("error", () => {});
+    assert.deepEqual(await t.inspect({ dbName, roleName }), { database: true, role: true });
+    assert.deepEqual(await t.dropDatabase({ dbName, roleName }), { droppedDb: true, droppedRole: true });
+    await app.end().catch(() => {});
+    assert.deepEqual(await t.inspect({ dbName, roleName }), { database: false, role: false });
+    assert.deepEqual(await t.dropDatabase({ dbName, roleName }), { droppedDb: false, droppedRole: false }, "second call: nothing to do");
+    await assert.rejects(t.dropDatabase({ dbName: "postgres", roleName: "postgres_app" }), /not an HQ club database/);
+    await assert.rejects(t.dropDatabase({ dbName: "club_x", roleName: "someone_else" }), /not an HQ club database/);
+    // a club_* database owned by someone else is refused
+    await admin.query(`CREATE DATABASE ${dbName}_foreign`);
+    await assert.rejects(t.dropDatabase({ dbName: `${dbName}_foreign`, roleName: `${dbName}_foreign_app` }), /owned by postgres/);
+  } finally {
+    await admin.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+    await admin.query(`DROP DATABASE IF EXISTS ${dbName}_foreign WITH (FORCE)`);
+    await admin.query(`DROP ROLE IF EXISTS ${roleName}`);
+    await admin.end();
+  }
+});

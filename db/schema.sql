@@ -110,3 +110,38 @@ CREATE TABLE IF NOT EXISTS outbound_emails (          -- outbox; sent by the wor
   sent_at     TIMESTAMPTZ,
   UNIQUE (signup_id, kind)
 );
+
+-- ── Club Honbu HQ: trial lifecycle (7-day trial → reminders → expiry → grace → teardown) ────────
+-- All additive and idempotent; the live site's older code keeps working against this schema.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_name = 'club_signups' AND column_name = 'expired_at') THEN
+    ALTER TABLE club_signups
+      ADD COLUMN auto_approved        BOOLEAN NOT NULL DEFAULT false, -- approved by AUTO_APPROVE_SIGNUPS
+      ADD COLUMN expired_at           TIMESTAMPTZ,  -- worker marked the trial expired (club app is read-only)
+      ADD COLUMN teardown_after       TIMESTAMPTZ,  -- end of the grace period: instance deleted after this
+      ADD COLUMN converted_at         TIMESTAMPTZ,  -- marked converted: NEVER torn down
+      ADD COLUMN removal_requested_at TIMESTAMPTZ,  -- teardown started (grace over or "Delete now")
+      ADD COLUMN removed_at           TIMESTAMPTZ,  -- every resource deleted
+      ADD COLUMN trial_extended_days  INT NOT NULL DEFAULT 0;
+  END IF;
+  -- status gains 'removing' (teardown in progress) and 'removed' (all resources deleted).
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conname = 'club_signups_status_check'
+                    AND pg_get_constraintdef(oid) LIKE '%removed%') THEN
+    ALTER TABLE club_signups DROP CONSTRAINT IF EXISTS club_signups_status_check;
+    ALTER TABLE club_signups ADD CONSTRAINT club_signups_status_check
+      CHECK (status IN ('new','contacted','approved','provisioning','trial_active',
+                        'converted','expired','rejected','removing','removed'));
+  END IF;
+  -- jobs: 'teardown' (delete the instance) and 'sync_trial' (push extend/convert to the instance).
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conname = 'provisioning_jobs_kind_check'
+                    AND pg_get_constraintdef(oid) LIKE '%teardown%') THEN
+    ALTER TABLE provisioning_jobs DROP CONSTRAINT IF EXISTS provisioning_jobs_kind_check;
+    ALTER TABLE provisioning_jobs ADD CONSTRAINT provisioning_jobs_kind_check
+      CHECK (kind IN ('provision','teardown','sync_trial'));
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS club_signups_lifecycle_idx ON club_signups (status, trial_ends_at);

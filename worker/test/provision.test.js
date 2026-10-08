@@ -34,7 +34,7 @@ test("success: approved sign-up -> service, DB, variables, DNS, deploy, health -
   assert.match(s.railway_url, /^https:\/\/.*\.up\.railway\.app$/);
   assert.equal(s.password_hash, null, "hash removed from HQ once handed to the instance");
   const days = (new Date(s.trial_ends_at) - before) / 86400000;
-  assert.ok(days > 13.99 && days < 14.01, `trial ends in ~14 days (${days})`);
+  assert.ok(days > 6.99 && days < 7.01, `trial ends in ~7 days (${days})`);
 
   const job = await one("SELECT * FROM provisioning_jobs WHERE signup_id=$1", [id]);
   assert.equal(job.status, "succeeded");
@@ -52,6 +52,8 @@ test("success: approved sign-up -> service, DB, variables, DNS, deploy, health -
   assert.equal(vars.ADMIN_USERNAME, "owner");
   assert.equal(vars.ADMIN_PASSWORD_HASH, HASH);
   assert.equal(vars.TRIAL_ENDS_AT, new Date(s.trial_ends_at).toISOString());
+  assert.equal(vars.TRIAL_GRACE_DAYS, "7");
+  assert.equal(vars.TRIAL_CONTACT_EMAIL, "hello@clubhonbu.co.uk");
   assert.match(vars.ADMIN_JWT_SECRET, /^[0-9a-f]{64}$/);
   assert.notEqual(vars.ADMIN_JWT_SECRET, vars.PORTAL_JWT_SECRET);
   assert.match(vars.DATABASE_URL, /^postgresql:\/\/club_happy_dojo_app:[0-9a-f]{32}@postgres\.railway\.internal:5432\/club_happy_dojo$/);

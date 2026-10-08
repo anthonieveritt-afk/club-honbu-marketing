@@ -15,7 +15,7 @@ export class PermanentError extends Error {
 export const STEPS = ["prepare", "database", "service", "configure", "domains", "dns", "deploy", "health", "finalize"];
 const DEPLOY_OK = new Set(["SUCCESS", "SLEEPING"]);
 const DEPLOY_BAD = new Set(["FAILED", "CRASHED", "REMOVED", "REMOVING", "SKIPPED"]);
-const HQ_DNS_COMMENT = "managed by club-honbu-hq";
+export const HQ_DNS_COMMENT = "managed by club-honbu-hq";
 
 export function namesFor(slug) {
   const ident = `club_${slug.replace(/-/g, "_")}`;
@@ -40,6 +40,9 @@ export function clubVariables({ signup, state, config }) {
     ADMIN_JWT_SECRET: deriveSecret(config.workerSecret, `admin-jwt:${state.slug}`, 64),
     PORTAL_JWT_SECRET: deriveSecret(config.workerSecret, `portal-jwt:${state.slug}`, 64),
     TRIAL_ENDS_AT: state.trialEndsAt,
+    // Display only in the club app ("data kept until ..."); HQ's sweep does the actual deletion.
+    ...(config.lifecycle ? { TRIAL_GRACE_DAYS: String(config.lifecycle.graceDays) } : {}),
+    ...(config.contactEmail ? { TRIAL_CONTACT_EMAIL: config.contactEmail } : {}),
     SITE_URL: `https://${fqdn}`,
     ...(config.trialUpgradeUrl ? { TRIAL_UPGRADE_URL: config.trialUpgradeUrl } : {}),
   };
