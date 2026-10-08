@@ -3,11 +3,19 @@
 import { headers } from "next/headers";
 import bcrypt from "bcryptjs";
 import { getPool } from "@/lib/db";
-import { autoApproveEnabled, autoApproveSignup, checkRateLimit, hashIp, insertSignup, markNotified } from "@/lib/signups";
+import { autoApproveEnabled, checkRateLimit, hashIp, insertSignup, markNotified } from "@/lib/signups";
+import { confirmUrl, logConfirmLinks, makeConfirmToken, testBypassAllowed, verificationEnabled, verifyTtlHours } from "@/lib/verify";
 
 export type SignupState =
   | { status: "idle" }
-  | { status: "success"; clubName: string }
+  | {
+      status: "success";
+      clubName: string;
+      /** Double opt-in: a confirmation link was emailed (or logged) and must be used first. */
+      verify?: { email: string; hours: number };
+      /** Automated tests only (SIGNUP_TEST_MODE=1 + reserved test domain): the link itself. */
+      testConfirmUrl?: string;
+    }
   | { status: "error"; message: string; fieldErrors?: Record<string, string> };
 
 export interface SignupFormData {
@@ -162,6 +170,9 @@ export async function submitSignup(data: SignupFormData): Promise<SignupState> {
   // Store (the source of truth). Without a database we fall back to the email alone.
   let signupId: string | null = null;
   let storeError: unknown = null;
+  // Double opt-in when SIGNUP_VERIFY_SECRET is set: nothing is approved until the link is used.
+  const verify = verificationEnabled();
+  const verifyExpiresAt = verify ? new Date(Date.now() + verifyTtlHours() * 3600_000) : null;
   if (getPool()) {
     try {
       const allowed = await checkRateLimit(ipHash, data.email);
@@ -183,6 +194,7 @@ export async function submitSignup(data: SignupFormData): Promise<SignupState> {
         passwordHash,
         ipHash,
         userAgent,
+        verifyExpiresAt,
       });
     } catch (err) {
       storeError = err;
@@ -192,17 +204,18 @@ export async function submitSignup(data: SignupFormData): Promise<SignupState> {
     console.error("[signup] DATABASE_URL not set: sign-up cannot be stored.");
   }
 
-  // AUTO_APPROVE_SIGNUPS=1: approve straight away so the worker builds the trial club now.
-  // Any problem leaves the sign-up "new" for manual approval; the person still sees success.
-  let autoApproved: string | null = null;
-  if (signupId && autoApproveEnabled()) {
-    try {
-      const r = await autoApproveSignup(signupId, data.clubName);
-      if (r.ok) autoApproved = r.message;
-      else console.warn(`[signup] auto-approve skipped for #${signupId}: ${r.error}`);
-    } catch (err) {
-      console.error(`[signup] auto-approve failed for #${signupId}:`, err);
-    }
+  // AUTO_APPROVE_SIGNUPS=1 only ever acts on a CONFIRMED email (app/actions/confirm.ts). Without
+  // SIGNUP_VERIFY_SECRET there is no confirmation, so sign-ups wait for manual approval.
+  if (signupId && autoApproveEnabled() && !verify) {
+    console.warn(`[signup] AUTO_APPROVE_SIGNUPS is on but SIGNUP_VERIFY_SECRET is not set: #${signupId} left for manual approval`);
+  }
+  const autoApproved: string | null = null;
+
+  // Confirmation link (double opt-in).
+  let link: string | null = null;
+  if (signupId && verify && verifyExpiresAt) {
+    link = confirmUrl(makeConfirmToken(signupId, data.email, verifyExpiresAt));
+    if (logConfirmLinks()) console.log(`[signup] confirmation link for #${signupId} (${data.email}): ${link}`);
   }
 
   // Notify Club Honbu (never includes the password).
@@ -219,12 +232,12 @@ export async function submitSignup(data: SignupFormData): Promise<SignupState> {
     </table>
     <p style="font-family:sans-serif;font-size:14px;">${
       signupId
-        ? `Saved.${autoApproved ? ` <strong>${escapeHtml(autoApproved)}</strong>: the trial club is being built now.` : ""} View all sign-ups: <a href="${siteUrl}/admin/signups">${siteUrl}/admin/signups</a>`
+        ? `Saved.${verify ? " Waiting for the club to confirm its email address; nothing is built until then." : ""}${autoApproved ? ` <strong>${escapeHtml(autoApproved)}</strong>: the trial club is being built now.` : ""} View all sign-ups: <a href="${siteUrl}/admin/signups">${siteUrl}/admin/signups</a>`
         : `<strong>NOT saved to the database</strong> (${storeError ? "database error" : "DATABASE_URL not set"}). This email is the only record; the chosen password was not kept.`
     }</p>
     <p style="margin-top:16px;color:#5C5C5C;font-size:12px;">Submitted via clubhonbu.co.uk/get-started</p>
   `;
-  const internalText = `New Club Honbu sign-up${signupId ? ` #${signupId}` : ""}\n\nClub: ${data.clubName}\nSport: ${data.sportType}\nContact: ${data.contactName}\nEmail: ${data.email}\nWebsite: ${data.website || "—"}\nUsername: ${data.adminUsername}\n\n${signupId ? `Saved.${autoApproved ? ` ${autoApproved}: the trial club is being built now.` : ""} ${siteUrl}/admin/signups` : "NOT saved to the database. This email is the only record."}\n`;
+  const internalText = `New Club Honbu sign-up${signupId ? ` #${signupId}` : ""}\n\nClub: ${data.clubName}\nSport: ${data.sportType}\nContact: ${data.contactName}\nEmail: ${data.email}\nWebsite: ${data.website || "—"}\nUsername: ${data.adminUsername}\n\n${signupId ? `Saved.${verify ? " Waiting for the club to confirm its email address." : ""}${autoApproved ? ` ${autoApproved}: the trial club is being built now.` : ""} ${siteUrl}/admin/signups` : "NOT saved to the database. This email is the only record."}\n`;
 
   const notifyResult = await sendEmail({
     to: NOTIFY_TO(),
@@ -248,9 +261,44 @@ export async function submitSignup(data: SignupFormData): Promise<SignupState> {
     };
   }
 
-  // Confirmation to the club: only once our own domain is verified in Resend (RESEND_FROM set),
-  // because Resend's test sender cannot deliver to other people's addresses.
-  if (process.env.RESEND_FROM) {
+  // Email to the club. Needs our own domain verified in Resend (RESEND_FROM set), because Resend's
+  // test sender cannot deliver to other people's addresses.
+  const canEmailClub = !!process.env.RESEND_FROM;
+  if (link && verifyExpiresAt) {
+    const hours = verifyTtlHours();
+    const confirmHtml = `
+      <div style="font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;max-width:520px;margin:0 auto;color:#0A0A0A;">
+        <h1 style="font-size:24px;font-weight:600;margin-bottom:8px;">Confirm your email, ${escapeHtml(data.contactName)}</h1>
+        <p style="color:#5C5C5C;margin-bottom:24px;">Thanks for signing up <strong>${escapeHtml(data.clubName)}</strong> for a 7-day Club Honbu trial. Please confirm this is your email address and we'll build your club straight away.</p>
+        <p style="margin:28px 0;"><a href="${escapeHtml(link)}" style="background:#0A0A0A;color:#fff;padding:12px 22px;border-radius:999px;text-decoration:none;font-weight:600;">Confirm my email</a></p>
+        <p style="color:#5C5C5C;font-size:13px;">The link works for ${hours} hours. If you didn't sign up, ignore this email and nothing will happen.</p>
+        <p style="color:#5C5C5C;font-size:12px;word-break:break-all;">${escapeHtml(link)}</p>
+        <hr style="border:none;border-top:1px solid #E8E2D7;margin:28px 0;" />
+        <p style="font-size:12px;color:#5C5C5C;">Club Honbu · <a href="https://clubhonbu.co.uk" style="color:#0066cc;">clubhonbu.co.uk</a></p>
+      </div>
+    `;
+    const confirmText = `Hi ${data.contactName},\n\nThanks for signing up ${data.clubName} for a 7-day Club Honbu trial. Please confirm your email address and we'll build your club straight away:\n\n${link}\n\nThe link works for ${hours} hours. If you didn't sign up, ignore this email and nothing will happen.\n\n— The Club Honbu team\nhttps://clubhonbu.co.uk`;
+    if (canEmailClub) {
+      const r = await sendEmail({
+        to: data.email,
+        subject: `Confirm your email to start your Club Honbu trial`,
+        html: confirmHtml,
+        text: confirmText,
+        replyTo: process.env.SIGNUP_REPLY_TO || "hello@clubhonbu.co.uk",
+      });
+      if (!r.ok && !r.skipped) console.error("[signup] Failed to send confirmation-link email:", r.error);
+    } else if (!logConfirmLinks()) {
+      console.warn(`[signup] RESEND_FROM not set: confirmation link for #${signupId} not emailed (admin can mark it confirmed)`);
+    }
+    return {
+      status: "success",
+      clubName: data.clubName,
+      verify: { email: data.email, hours },
+      ...(testBypassAllowed(data.email) ? { testConfirmUrl: link } : {}),
+    };
+  }
+
+  if (canEmailClub) {
     const confirmHtml = `
       <div style="font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;max-width:520px;margin:0 auto;color:#0A0A0A;">
         <h1 style="font-size:24px;font-weight:600;margin-bottom:8px;">Thanks, ${escapeHtml(data.contactName)}.</h1>

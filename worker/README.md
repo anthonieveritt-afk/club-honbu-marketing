@@ -29,7 +29,8 @@ Statuses: `approved` → `provisioning` → `trial_active` ; if the job gives up
 * **No duplicates.** One job per sign-up (`UNIQUE(signup_id, kind)`); jobs are claimed with `FOR UPDATE SKIP LOCKED` and a lease; every external object has a deterministic name and is looked up before being created; the welcome email is `UNIQUE(signup_id, kind)` and sent with a Resend `Idempotency-Key`.
 * **Resumable.** Progress is saved to `provisioning_jobs.state` after each step. A failed job retries with backoff (1/5/15/60 min) from the step that failed; a crashed worker's lease expires and another run picks it up.
 * **Secrets** (DB password, session/JWT secrets) are derived with HMAC from `WORKER_SECRET` + slug, so re-runs produce the same values and nothing secret is stored in the HQ DB.
-* Emails only go out when `EMAILS_ENABLED=1` (or `WELCOME_EMAIL_ENABLED=1`) **and** `RESEND_API_KEY` is set. The email never contains a password.
+* Emails only go out when `EMAILS_ENABLED=1` (or `WELCOME_EMAIL_ENABLED=1`) **and** `RESEND_API_KEY` is set. With `EMAIL_LOG_ONLY=1` (and sending off) they are printed to the log and marked `logged` instead (staging). The email never contains a password.
+* The lifecycle sweep also expires sign-ups whose email was never confirmed (double opt-in, `verify_expires_at`).
 
 ## Commands
 ```
@@ -46,7 +47,7 @@ Tests need a throwaway local Postgres: `TEST_PG_ADMIN_URL` (default `postgres://
 
 ## Env
 See `src/config.js` and the table in [`../docs/trial-lifecycle.md`](../docs/trial-lifecycle.md). Live mode refuses to start without `HQ_DATABASE_URL`, `WORKER_SECRET` (32+ chars), `RAILWAY_API_TOKEN`, `TENANT_PROJECT_ID`, `TENANT_ENVIRONMENT_ID`, `TENANT_PG_ADMIN_URL`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ZONE_ID` and `CLUB_SOURCE_BRANCH` (or `CLUB_SOURCE_IMAGE`) — there is no default branch because club-honbu `main` has no trial code yet; use `feat/trial-lifecycle` until it is merged.
-Optional: `CLUB_SOURCE_REPO`, `TENANT_REGION`, `TENANT_SERVERLESS`, `TENANT_PG_APP_HOST`, `BASE_DOMAIN`, `TRIAL_DAYS` (7), `TRIAL_GRACE_DAYS` (7), `TRIAL_REMINDER_DAYS` (`2,1`), `SWEEP_INTERVAL_MS`, `LIFECYCLE_ENABLED`, `TEARDOWN_ENABLED`, `DRY_RUN`, `TRIAL_UPGRADE_URL`, `TRIAL_CONTACT_EMAIL`, `EMAILS_ENABLED` (or `WELCOME_EMAIL_ENABLED`), `RESEND_API_KEY`, `EMAIL_FROM`, timeouts.
+Optional: `CLUB_SOURCE_REPO`, `TENANT_REGION`, `TENANT_SERVERLESS`, `TENANT_PG_APP_HOST`, `BASE_DOMAIN`, `TRIAL_DAYS` (7), `TRIAL_GRACE_DAYS` (7), `TRIAL_REMINDER_DAYS` (`2,1`), `SWEEP_INTERVAL_MS`, `LIFECYCLE_ENABLED`, `TEARDOWN_ENABLED`, `DRY_RUN`, `TRIAL_UPGRADE_URL`, `TRIAL_CONTACT_EMAIL`, `EMAILS_ENABLED` (or `WELCOME_EMAIL_ENABLED`), `EMAIL_LOG_ONLY`, `RESEND_API_KEY`, `EMAIL_FROM`, timeouts.
 
 ## Deploy
 Not deployed. Runs as a Railway service built from `worker/Dockerfile` with the repo root as context, in its own project/service — see the step-by-step test and go-live order in [`../docs/trial-lifecycle.md`](../docs/trial-lifecycle.md).

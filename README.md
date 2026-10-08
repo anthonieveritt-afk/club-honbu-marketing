@@ -106,7 +106,10 @@ Actions (server actions, same Basic auth, re-checked):
   subdomain to confirm), **Retry removal** / **Retry instance update** — see
   [`docs/trial-lifecycle.md`](docs/trial-lifecycle.md).
 
-With `AUTO_APPROVE_SIGNUPS=1` new sign-ups are approved automatically with a unique subdomain from
+With `SIGNUP_VERIFY_SECRET` set, sign-ups are stored as `pending_verification` and emailed a signed
+link to `/get-started/confirm` (valid 48 hours; opening it shows a "Confirm my email" button, so mail
+scanners can't confirm). Unconfirmed sign-ups expire and their password hash is deleted. Admin can
+"Mark email confirmed". With `AUTO_APPROVE_SIGNUPS=1` confirmed sign-ups are approved automatically with a unique subdomain from
 the club name (`my-dojo`, `my-dojo-2`, …), capped by `AUTO_APPROVE_MAX_PER_DAY` (default 20);
 anything unusual falls back to manual Approve. The trial is 7 days, then 7 days read-only, then the
 club is removed — the full lifecycle, env vars, a staging end-to-end test and rollback are in
@@ -128,7 +131,10 @@ polls `provisioning_jobs` and builds the club's trial instance, then sets the si
 | `SITE_URL` | no | Default `https://clubhonbu.co.uk` (link in the notification) |
 | `PG_SSL_NO_VERIFY` | no | `1` only if the DB proxy uses a self-signed cert |
 | `SIGNUP_LIMIT_PER_IP_HOUR` / `SIGNUP_LIMIT_PER_EMAIL_DAY` | no | Override rate limits (5 / 3) |
-| `AUTO_APPROVE_SIGNUPS` | no | `1` = approve sign-ups automatically (default off) |
+| `SIGNUP_VERIFY_SECRET` | no | 32+ chars: turns on email confirmation (double opt-in) before anything is approved |
+| `SIGNUP_VERIFY_TTL_HOURS` | no | Confirmation link lifetime, default 48 |
+| `SIGNUP_LOG_CONFIRM_LINKS` / `SIGNUP_TEST_MODE` | staging / tests only | Log the link / show it on the page for reserved test domains |
+| `AUTO_APPROVE_SIGNUPS` | no | `1` = approve CONFIRMED sign-ups automatically (default off; needs `SIGNUP_VERIFY_SECRET`) |
 | `AUTO_APPROVE_MAX_PER_DAY` | no | Daily cap for auto-approval, default 20 |
 | `TRIAL_DAYS` / `TRIAL_GRACE_DAYS` / `BASE_DOMAIN` | no | Display on /admin only; keep equal to the worker's (7 / 7 / clubhonbu.co.uk) |
 

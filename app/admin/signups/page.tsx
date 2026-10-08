@@ -3,8 +3,9 @@ import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { isAdminAuthorized } from "@/lib/admin-auth";
 import { listSignups, autoApproveEnabled, type SignupRow } from "@/lib/signups";
+import { verificationEnabled, verifyTtlHours } from "@/lib/verify";
 import { suggestSlug } from "@/lib/slug";
-import { approveAction, rejectAction, retryAction, extendAction, convertAction, deleteNowAction } from "./actions";
+import { approveAction, rejectAction, retryAction, extendAction, convertAction, deleteNowAction, confirmEmailAdminAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -87,7 +88,7 @@ function Lifecycle({ r }: { r: SignupRow }) {
 
 function Actions({ r }: { r: SignupRow }) {
   const canDecide = r.status === "new" || r.status === "contacted";
-  const canReject = canDecide || (r.status === "approved" && (r.job_status === "queued" || !r.job_status));
+  const canReject = canDecide || r.status === "pending_verification" || (r.status === "approved" && (r.job_status === "queued" || !r.job_status));
   // Extend/convert can still stop a removal that hasn't started a single step yet.
   const teardownPending = r.status === "removing" && !r.teardown_step && (!r.teardown_status || r.teardown_status === "queued" || r.teardown_status === "cancelled");
   const canExtend = r.status === "trial_active" || r.status === "expired" || teardownPending;
@@ -95,6 +96,18 @@ function Actions({ r }: { r: SignupRow }) {
   const canDelete = r.status === "trial_active" || r.status === "expired" || (r.status === "provisioning" && r.job_status === "failed");
   return (
     <div className="flex min-w-[16rem] flex-col gap-2">
+      {r.status === "pending_verification" && (
+        <div className="space-y-1" data-testid="awaiting-confirmation">
+          <div className="text-xs text-amber-700">
+            Awaiting email confirmation{r.verify_expires_at ? ` · link expires ${fmt.format(new Date(r.verify_expires_at))}` : ""}
+          </div>
+          <form action={confirmEmailAdminAction} data-testid="admin-confirm-form">
+            <input type="hidden" name="id" value={r.id} />
+            <button type="submit" className={`${btn} border border-line hover:bg-black/5`}>Mark email confirmed</button>
+          </form>
+        </div>
+      )}
+      {r.status === "verification_expired" && <div className="text-xs text-muted">Email never confirmed; nothing was built.</div>}
       {canDecide && (
         <form action={approveAction} className="flex items-center gap-1" data-testid="approve-form">
           <input type="hidden" name="id" value={r.id} />
@@ -204,7 +217,14 @@ export default async function AdminSignupsPage({
       <p className="mt-2 text-sm text-muted">
         Approve queues a provisioning job; the HQ worker picks it up and builds the club&apos;s trial
         instance (nothing is created from this website directly).
-        {autoApproveEnabled() ? " Auto-approve is ON: new sign-ups are approved with a subdomain from the club name." : ""}
+        {verificationEnabled()
+          ? ` Email confirmation is ON: sign-ups wait as "pending_verification" until the club clicks the link (valid ${verifyTtlHours()} hours).`
+          : ""}
+        {autoApproveEnabled()
+          ? verificationEnabled()
+            ? " Auto-approve is ON: confirmed sign-ups are approved with a subdomain from the club name."
+            : " Auto-approve is set but inactive: it needs email confirmation (SIGNUP_VERIFY_SECRET)."
+          : ""}
         {" "}Trials last {TRIAL_DAYS} days, then the club is read-only for {GRACE_DAYS} days and deleted unless it is
         extended or marked converted.
       </p>

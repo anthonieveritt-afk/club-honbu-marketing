@@ -51,6 +51,9 @@ export function loadConfig(env = process.env) {
       // EMAILS_ENABLED=1 sends every queued email (welcome, reminders, trial ended, removed).
       // WELCOME_EMAIL_ENABLED=1 is the older name and still works.
       enabled: env.EMAILS_ENABLED === "1" || env.WELCOME_EMAIL_ENABLED === "1",
+      // Staging without an email provider: EMAIL_LOG_ONLY=1 prints each queued email to the log and
+      // marks it 'logged' (never sent later). Ignored when sending is enabled.
+      logOnly: env.EMAIL_LOG_ONLY === "1",
       resendApiKey: env.RESEND_API_KEY,
       from: env.EMAIL_FROM || "Club Honbu <hello@clubhonbu.co.uk>",
       replyTo: env.EMAIL_REPLY_TO || "hello@clubhonbu.co.uk",

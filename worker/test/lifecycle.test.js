@@ -32,7 +32,11 @@ function deps(now, opts = {}) {
     httpStatus: createFakeHttp(), sleep: async () => {}, now,
   };
 }
-const sweep = (now, cfg = testConfig()) => runLifecycleSweep({ store: env.store, config: cfg, now: now(), log: quiet });
+const sweep = async (now, cfg = testConfig()) => {
+  const r = await runLifecycleSweep({ store: env.store, config: cfg, now: now(), log: quiet });
+  if (!r.unconfirmedExpired) delete r.unconfirmedExpired; // only the double opt-in test looks at it
+  return r;
+};
 const work = (d, cfg = testConfig()) => workOnce({ store: env.store, deps: d, config: cfg, log: quiet });
 async function drain(d, cfg) { let n = 0, r; while ((r = await work(d, cfg)) !== "idle" && n++ < 20) { /* run all due jobs */ } return r; }
 
@@ -303,4 +307,43 @@ test("TEARDOWN_ENABLED=0 queues nothing; DRY RUN teardown preview reads but neve
   assert.ok(lines.some((l) => /WOULD cloudflare\.deleteRecord/.test(l)));
   assert.ok(lines.some((l) => /WOULD tenantDb\.dropDatabase .*club_preview_club/.test(l)));
   assert.equal(d.railway._s.services.filter((s) => s.name === "club-preview-club").length, 1);
+});
+
+test("unconfirmed sign-ups (double opt-in) expire in the sweep and are never provisioned", async () => {
+  const now = clock(Date.parse("2026-11-02T10:00:00Z"));
+  const ins = async (email, expires) => (await one(
+    `INSERT INTO club_signups (club_name, sport_type, contact_name, email, admin_username, password_hash, status, verify_expires_at)
+     VALUES ('Unconfirmed', 'General', 'X', $1, 'unc', 'hash', 'pending_verification', $2) RETURNING id`, [email, new Date(expires)])).id;
+  const stale = await ins("stale@example.com", now() - 1000);
+  const fresh = await ins("fresh@example.com", now() + 47 * 3600_000);
+  const r = await sweep(now);
+  assert.equal(r.unconfirmedExpired, 1);
+  const s1 = await one("SELECT status, password_hash FROM club_signups WHERE id=$1", [stale]);
+  assert.deepEqual(s1, { status: "verification_expired", password_hash: null });
+  assert.equal((await one("SELECT status FROM club_signups WHERE id=$1", [fresh])).status, "pending_verification");
+  assert.ok(await one("SELECT 1 AS x FROM provisioning_events WHERE signup_id=$1 AND step='verify'", [stale]));
+  assert.equal((await sweep(now)).unconfirmedExpired ?? 0, 0, "idempotent");
+  assert.equal((await one("SELECT count(*)::int AS n FROM provisioning_jobs WHERE signup_id IN ($1,$2)", [stale, fresh])).n, 0);
+  await env.db.query("DELETE FROM club_signups WHERE id IN ($1,$2)", [stale, fresh]);
+});
+
+test("EMAIL_LOG_ONLY prints queued emails (with links) instead of sending and marks them logged", async () => {
+  await env.db.query("UPDATE outbound_emails SET status = 'sent' WHERE status = 'queued'"); // earlier tests' outbox
+  const id = (await one(`INSERT INTO club_signups (club_name, sport_type, contact_name, email, admin_username, status)
+     VALUES ('Log Club', 'General', 'L', 'log@example.com', 'logc', 'new') RETURNING id`)).id;
+  await env.store.queueEmail({ signupId: id, kind: "welcome", to: "log@example.com", subject: "Ready", text: "Sign in: https://x.example/admin/login", html: "<p>x</p>" });
+  const lines = [];
+  const cfg = testConfig({ email: { enabled: false, logOnly: true } });
+  const sentFetch = [];
+  const n = await sendQueuedEmails({ store: env.store, resend: { send: async () => sentFetch.push(1) }, config: cfg, log: (l) => lines.push(l) });
+  assert.equal(n, 1);
+  assert.equal(sentFetch.length, 0, "nothing sent");
+  assert.match(lines.join("\n"), /\[email:logged\].*welcome to log@example\.com: Ready[\s\S]*https:\/\/x\.example\/admin\/login/);
+  assert.equal((await one("SELECT status FROM outbound_emails WHERE signup_id=$1", [id])).status, "logged");
+  assert.equal(await sendQueuedEmails({ store: env.store, resend: null, config: cfg, log: quiet }), 0, "logged once only");
+  // emails off and not log-only: left queued (old behaviour)
+  await env.store.queueEmail({ signupId: id, kind: "other", to: "log@example.com", subject: "S", text: "t", html: "" });
+  assert.equal(await sendQueuedEmails({ store: env.store, resend: null, config: testConfig({ email: { enabled: false } }), log: quiet }), 0);
+  assert.equal((await one("SELECT status FROM outbound_emails WHERE signup_id=$1 AND kind='other'", [id])).status, "queued");
+  await env.db.query("DELETE FROM club_signups WHERE id=$1", [id]);
 });

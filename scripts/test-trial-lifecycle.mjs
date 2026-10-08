@@ -1,12 +1,13 @@
 // End-to-end check of the free-trial lifecycle WITHOUT payment, against a local build and a throwaway
 // local Postgres, with FAKE Railway/Cloudflare/tenant-DB (nothing real is created or deleted):
 //
-//   /get-started sign-up ─▶ auto-approve (AUTO_APPROVE_SIGNUPS=1, slug from the club name, unique)
+//   /get-started sign-up ─▶ email confirmation (double opt-in, signed expiring link) ─▶ auto-approve (AUTO_APPROVE_SIGNUPS=1, slug from the club name, unique)
 //   ─▶ worker provisions ─▶ 2-day + 1-day reminders ─▶ expiry ─▶ grace ─▶ teardown ─▶ removed
 //   + admin actions on /admin/signups: Extend trial, Mark converted (never torn down), Delete now.
 //
 //   pnpm build
-//   DATABASE_URL=postgres://postgres@127.0.0.1:5544/hq_e2e ADMIN_PASSWORD=... AUTO_APPROVE_SIGNUPS=1 pnpm start -p 3102 &
+//   DATABASE_URL=postgres://postgres@127.0.0.1:5544/hq_e2e ADMIN_PASSWORD=... AUTO_APPROVE_SIGNUPS=1 \
+//     SIGNUP_VERIFY_SECRET=<32+ chars> SIGNUP_TEST_MODE=1 SIGNUP_LIMIT_PER_IP_HOUR=50 SITE_URL=http://localhost:3102 pnpm start -p 3102 &
 //   BASE_URL=http://localhost:3102 DATABASE_URL=... ADMIN_PASSWORD=... node scripts/test-trial-lifecycle.mjs
 import assert from "node:assert/strict";
 import pg from "pg";
@@ -45,7 +46,7 @@ const sweep = () => runLifecycleSweep({ store, config, now: now(), log: quiet })
 
 const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || "/usr/bin/google-chrome", args: ["--no-sandbox"] });
 const page = await browser.newPage();
-async function signup(n, clubName) {
+async function submitForm(email, clubName, username) {
   await page.goto(`${BASE}/get-started`, { waitUntil: "networkidle" });
   const text0 = await page.innerText("main");
   assert.match(text0, /7-day trial/);
@@ -53,15 +54,32 @@ async function signup(n, clubName) {
   await page.fill("#clubName", clubName);
   await page.selectOption("#sportType", "Martial Arts");
   await page.fill("#contactName", "Trial Tester");
-  await page.fill("#email", `trial+${run}-${n}@example.com`);
-  await page.fill("#adminUsername", `coach_${n}`);
-  await page.fill("#password", `Trial-pass-${run}-${n}`);
-  await page.fill("#confirmPassword", `Trial-pass-${run}-${n}`);
+  await page.fill("#email", email);
+  await page.fill("#adminUsername", username);
+  await page.fill("#password", `Trial-pass-${run}`);
+  await page.fill("#confirmPassword", `Trial-pass-${run}`);
   await page.waitForTimeout(3200);
   await page.click('button[type="submit"]');
-  await page.waitForFunction(() => /Thanks — we've got it|Something went wrong|couldn't save/.test(document.body.innerText), null, { timeout: 20000 });
-  assert.match(await page.innerText("main"), /Thanks — we've got it/);
-  return (await one(`SELECT * FROM club_signups WHERE email=$1`, [`trial+${run}-${n}@example.com`]));
+  await page.waitForFunction(() => /Check your email|Thanks — we've got it|Something went wrong|couldn't save|several sign-ups/.test(document.body.innerText), null, { timeout: 20000 });
+  assert.match(await page.innerText("main"), /Check your email/);
+  const link = await page.locator('[data-testid="test-confirm-link"]').getAttribute("href").catch(() => null);
+  if (link) assert.ok(link.startsWith(`${BASE}/`), `confirmation link must point at the server under test (start it with SITE_URL=${BASE})`);
+  return { row: await one(`SELECT * FROM club_signups WHERE email=$1 ORDER BY id DESC LIMIT 1`, [email]), link };
+}
+/** Opens the confirmation link and clicks "Confirm my email" (the real double opt-in path). */
+async function confirm(link) {
+  await page.goto(link, { waitUntil: "networkidle" });
+  await page.click('[data-testid="confirm-button"]');
+  await page.waitForSelector('[data-testid="confirm-done"]', { timeout: 15000 });
+  return page.innerText("main");
+}
+async function signup(n, clubName) {
+  const email = `trial+${run}-${n}@example.com`;
+  const { row, link } = await submitForm(email, clubName, `coach_${n}`);
+  assert.equal(row.status, "pending_verification");
+  assert.ok(link, "test mode shows the confirmation link for example.com addresses");
+  await confirm(link);
+  return one(`SELECT * FROM club_signups WHERE id=$1`, [row.id]);
 }
 
 // ── marketing copy ──
@@ -70,6 +88,50 @@ async function signup(n, clubName) {
   assert.match(home, /7-day free trial/);
   assert.doesNotMatch(home, /14-day|14 days/);
   ok("home page and /get-started advertise a 7-day trial (no 14-day copy left)");
+}
+
+// ── 0. double opt-in: nothing is approved or queued until the emailed link is used ──
+{
+  const email = `optin+${run}@example.com`;
+  const { row, link } = await submitForm(email, `Optin Dojo ${run}`, "optin_user");
+  assert.equal(row.status, "pending_verification");
+  assert.equal(row.slug, null);
+  assert.ok(row.verify_expires_at && Math.abs(new Date(row.verify_expires_at) - Date.now() - 48 * 3600_000) < 120000, "link valid 48h");
+  assert.equal((await one(`SELECT count(*)::int n FROM provisioning_jobs WHERE signup_id=$1`, [row.id])).n, 0);
+  assert.match(link, new RegExp(`/get-started/confirm\\?t=${row.id}\\.`));
+  ok("sign-up stored as pending_verification (link valid 48h); not approved, no job queued");
+
+  // A tampered token is refused; just OPENING the link (mail scanners) changes nothing.
+  const bad = link.replace(/.(?=$)/, (c) => (c === "A" ? "B" : "A"));
+  await page.goto(bad, { waitUntil: "networkidle" });
+  assert.ok(await page.locator('[data-testid="confirm-invalid"]').count());
+  await page.goto(link, { waitUntil: "networkidle" });
+  assert.ok(await page.locator('[data-testid="confirm-ready"]').count());
+  assert.equal((await one(`SELECT status FROM club_signups WHERE id=$1`, [row.id])).status, "pending_verification");
+  ok("tampered link rejected; opening the real link (GET) does not confirm by itself");
+
+  const text = await confirm(link);
+  assert.match(text, /Email confirmed[\s\S]*being set up now/);
+  let r = await one(`SELECT * FROM club_signups WHERE id=$1`, [row.id]);
+  assert.equal(r.status, "approved"); assert.equal(r.auto_approved, true); assert.ok(r.email_verified_at);
+  await page.goto(link, { waitUntil: "networkidle" });
+  assert.ok(await page.locator('[data-testid="confirm-done"]').count(), "re-opening shows 'confirmed'");
+  // replaying the POST is harmless
+  assert.equal((await one(`SELECT count(*)::int n FROM provisioning_jobs WHERE signup_id=$1`, [row.id])).n, 1);
+  ok("Confirm my email → confirmed and auto-approved with exactly one job; re-use is harmless");
+  await db.query(`DELETE FROM club_signups WHERE id=$1`, [row.id]);
+
+  // Expired link: shows 'expired'; the sweep/admin page expires the row and deletes the password hash.
+  const e = await submitForm(`late+${run}@example.com`, `Late Dojo ${run}`, "late_user");
+  await db.query(`UPDATE club_signups SET verify_expires_at = now() - interval '1 minute' WHERE id=$1`, [e.row.id]);
+  // the token carries its own expiry (48h): simulate an old link by signing one that is already expired
+  await page.goto(e.link, { waitUntil: "networkidle" });
+  await page.click('[data-testid="confirm-button"]');
+  await page.waitForSelector('[data-testid="confirm-expired"]', { timeout: 15000 });
+  r = await one(`SELECT status, password_hash, slug FROM club_signups WHERE id=$1`, [e.row.id]);
+  assert.deepEqual(r, { status: "verification_expired", password_hash: null, slug: null });
+  ok("confirming after the 48h window: 'link expired', sign-up expired, password hash deleted, nothing built");
+
 }
 
 // ── 1. sign-up → auto-approve ──
@@ -200,6 +262,25 @@ await sendQueuedEmails({ store, resend, config: testConfig({ email: { ...testCon
 const subjectsA = sent.filter((m) => m.to === a.email).map((m) => m.subject);
 assert.deepEqual(subjectsA, [`${clubName} is ready on Club Honbu`, "Your Club Honbu trial ends in 2 days", "Your Club Honbu trial ends tomorrow", "Your Club Honbu trial has ended", "Your Club Honbu trial club has been deleted"]);
 ok("club A received: welcome, 2-day, 1-day, trial ended, deleted (once each)");
+
+// ── 10. admin: unconfirmed sign-up → "Mark email confirmed" → auto-approved ──
+{
+  // Real (non-test) addresses never get the link on the page, even in test mode.
+  const g = await submitForm(`club-honbu-e2e-${run}@gmail.com`, `Real Mail Dojo ${run}`, "real_user");
+  assert.equal(g.link, null);
+  assert.equal(g.row.status, "pending_verification");
+  ok("test-mode bypass only for reserved test domains (a gmail address gets no on-page link)");
+  const pid = g.row.id;
+  await open();
+  assert.match(await admin.innerText("main"), /Email confirmation is ON/);
+  assert.match(await row(pid).innerText(), /Awaiting email confirmation · link expires/);
+  assert.equal(await row(pid).locator('[data-testid="approve-form"]').count(), 0, "no Approve before confirmation");
+  await row(pid).getByRole("button", { name: "Mark email confirmed" }).click();
+  await flash("ok", /email marked confirmed\. Auto-approved as real-mail-dojo/);
+  const p = await one(`SELECT status, auto_approved, email_verified_at FROM club_signups WHERE id=$1`, [pid]);
+  assert.equal(p.status, "approved"); assert.equal(p.auto_approved, true); assert.ok(p.email_verified_at);
+  ok("admin 'Mark email confirmed' on an unconfirmed sign-up → confirmed and auto-approved");
+}
 
 await admin.screenshot({ path: process.env.SCREENSHOT || "/tmp/hq-trial-lifecycle.png", fullPage: true });
 await browser.close();

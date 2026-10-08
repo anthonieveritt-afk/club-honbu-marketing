@@ -88,7 +88,7 @@ export default function GetStartedPage() {
           {/* Card */}
           <div className="max-w-lg mx-auto">
             {state.status === "success" ? (
-              <SuccessCard clubName={state.clubName} />
+              <SuccessCard clubName={state.clubName} verify={state.verify} testConfirmUrl={state.testConfirmUrl} />
             ) : (
               <div className="rounded-2xl border border-line bg-white/60 px-8 py-10 md:px-10">
                 <form onSubmit={handleSubmit} noValidate className="space-y-6">
@@ -314,7 +314,43 @@ export default function GetStartedPage() {
   );
 }
 
-function SuccessCard({ clubName }: { clubName: string }) {
+function SuccessCard({
+  clubName,
+  verify,
+  testConfirmUrl,
+}: {
+  clubName: string;
+  verify?: { email: string; hours: number };
+  testConfirmUrl?: string;
+}) {
+  if (verify) {
+    return (
+      <div data-testid="check-email" className="rounded-2xl border border-line bg-white/60 px-8 py-12 md:px-10 text-center">
+        <h2 className="text-2xl md:text-3xl font-semibold tracking-tight mb-3">Check your email</h2>
+        <p className="text-muted leading-relaxed max-w-sm mx-auto">
+          We've sent a link to <strong className="text-ink">{verify.email}</strong>. Click it to confirm your
+          address and we'll build <strong className="text-ink">{clubName}</strong> straight away. The link works
+          for {verify.hours} hours.
+        </p>
+        {testConfirmUrl && (
+          <p className="mt-6 text-xs text-muted">
+            Test mode:{" "}
+            <a data-testid="test-confirm-link" href={testConfirmUrl} className="text-accent underline">
+              confirmation link
+            </a>
+          </p>
+        )}
+        <div className="mt-8 pt-6 border-t border-line">
+          <p className="text-sm text-muted">
+            Nothing arrived? Check spam, or email{" "}
+            <a href="mailto:hello@clubhonbu.co.uk" className="text-accent underline-offset-2 hover:underline">
+              hello@clubhonbu.co.uk
+            </a>
+          </p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="rounded-2xl border border-line bg-white/60 px-8 py-12 md:px-10 text-center">
       <div className="mx-auto mb-6 flex h-14 w-14 items-center justify-center rounded-full bg-green-50 border border-green-200">

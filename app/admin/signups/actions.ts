@@ -4,7 +4,7 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { isAdminAuthorized } from "@/lib/admin-auth";
-import { approveSignup, rejectSignup, retryJob, extendTrial, markConverted, deleteNow, type ActionResult } from "@/lib/signups";
+import { approveSignup, rejectSignup, retryJob, extendTrial, markConverted, deleteNow, adminConfirmEmail, autoApproveEnabled, autoApproveSignup, type ActionResult } from "@/lib/signups";
 
 // Server actions POST to /admin/signups, so middleware's Basic auth applies; re-checked here anyway.
 function requireAdmin() {
@@ -52,4 +52,16 @@ export async function convertAction(formData: FormData) {
 
 export async function deleteNowAction(formData: FormData) {
   await run(() => deleteNow(String(formData.get("id") || ""), String(formData.get("confirm") || "")));
+}
+
+export async function confirmEmailAdminAction(formData: FormData) {
+  await run(async () => {
+    const id = String(formData.get("id") || "");
+    const r = await adminConfirmEmail(id);
+    if (r.ok && autoApproveEnabled() && r.clubName) {
+      const a = await autoApproveSignup(id, r.clubName);
+      return a.ok ? { ok: true, message: `${r.message} ${a.message}.` } : { ok: true, message: `${r.message} Not auto-approved: ${a.error}` };
+    }
+    return r;
+  });
 }

@@ -147,4 +147,35 @@ BEGIN
   END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS club_signups_lifecycle_idx ON club_signups (status, trial_ends_at);
+
+-- ── Email confirmation (double opt-in) before anything is provisioned ────────────────────────
+-- 'pending_verification': stored, confirmation link emailed, nothing approved or queued.
+-- 'verification_expired': link not used within SIGNUP_VERIFY_TTL_HOURS; password hash cleared.
+-- Additive and idempotent; older code keeps inserting 'new' rows as before.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_name = 'club_signups' AND column_name = 'verify_expires_at') THEN
+    ALTER TABLE club_signups
+      ADD COLUMN email_verified_at TIMESTAMPTZ,  -- confirmation link clicked (or confirmed by admin)
+      ADD COLUMN verify_expires_at TIMESTAMPTZ;  -- confirmation link expiry
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conname = 'club_signups_status_check'
+                    AND pg_get_constraintdef(oid) LIKE '%pending_verification%') THEN
+    ALTER TABLE club_signups DROP CONSTRAINT IF EXISTS club_signups_status_check;
+    ALTER TABLE club_signups ADD CONSTRAINT club_signups_status_check
+      CHECK (status IN ('pending_verification','verification_expired','new','contacted','approved',
+                        'provisioning','trial_active','converted','expired','rejected','removing','removed'));
+  END IF;
+  -- outbox: 'logged' = printed to the worker log instead of sent (EMAIL_LOG_ONLY=1, staging).
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conname = 'outbound_emails_status_check'
+                    AND pg_get_constraintdef(oid) LIKE '%logged%') THEN
+    ALTER TABLE outbound_emails DROP CONSTRAINT IF EXISTS outbound_emails_status_check;
+    ALTER TABLE outbound_emails ADD CONSTRAINT outbound_emails_status_check
+      CHECK (status IN ('queued','sent','failed','logged'));
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS club_signups_verify_idx ON club_signups (verify_expires_at) WHERE status = 'pending_verification';
 `;

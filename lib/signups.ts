@@ -3,8 +3,11 @@ import { createHash } from "node:crypto";
 import { getPool } from "./db";
 import { SCHEMA_SQL } from "./schema";
 import { isValidSlug, slugCandidates } from "./slug";
+import { checkConfirmToken, parseConfirmToken } from "./verify";
 
 export type SignupStatus =
+  | "pending_verification"
+  | "verification_expired"
   | "new"
   | "contacted"
   | "approved"
@@ -45,6 +48,8 @@ export interface SignupRow {
   removal_requested_at: Date | null;
   removed_at: Date | null;
   trial_extended_days: number;
+  email_verified_at: Date | null;
+  verify_expires_at: Date | null;
   teardown_status: JobStatus | null;
   teardown_step: string | null;
   teardown_error: string | null;
@@ -116,6 +121,8 @@ export async function insertSignup(s: {
   passwordHash: string;
   ipHash: string;
   userAgent: string;
+  /** Double opt-in: store as 'pending_verification' until the emailed link is used. */
+  verifyExpiresAt?: Date | null;
 }): Promise<string> {
   const pool = getPool();
   if (!pool) throw new Error("DATABASE_URL is not set");
@@ -123,8 +130,8 @@ export async function insertSignup(s: {
   const { rows } = await pool.query<{ id: string }>(
     `INSERT INTO club_signups
        (club_name, sport_type, contact_name, email, website, admin_username,
-        password_hash, ip_hash, user_agent)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        password_hash, ip_hash, user_agent, status, verify_expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      RETURNING id`,
     [
       s.clubName,
@@ -136,6 +143,8 @@ export async function insertSignup(s: {
       s.passwordHash,
       s.ipHash,
       s.userAgent.slice(0, 300),
+      s.verifyExpiresAt ? "pending_verification" : "new",
+      s.verifyExpiresAt ?? null,
     ]
   );
   return rows[0].id;
@@ -151,12 +160,13 @@ export async function listSignups(limit = 500): Promise<SignupRow[]> {
   const pool = getPool();
   if (!pool) throw new Error("DATABASE_URL is not set");
   await ensureSchema();
+  await expireUnverifiedSignups().catch((err) => console.error("[signups] expiring unconfirmed sign-ups failed:", err));
   const { rows } = await pool.query<SignupRow>(
     `SELECT s.id, s.created_at, s.club_name, s.sport_type, s.contact_name, s.email, s.website,
             s.admin_username, s.status, s.notified_at, s.slug, s.decided_at, s.rejected_reason,
             s.instance_url, s.railway_url, s.trial_ends_at,
             s.auto_approved, s.expired_at, s.teardown_after, s.converted_at, s.removal_requested_at,
-            s.removed_at, s.trial_extended_days,
+            s.removed_at, s.trial_extended_days, s.email_verified_at, s.verify_expires_at,
             j.id AS job_id, j.status AS job_status, j.current_step AS job_step,
             j.attempts AS job_attempts, j.last_error AS job_error,
             t.status AS teardown_status, t.current_step AS teardown_step, t.last_error AS teardown_error,
@@ -250,7 +260,7 @@ export async function rejectSignup(id: string, reason: string): Promise<ActionRe
     const cur = (await q(`SELECT id, status FROM club_signups WHERE id = $1 FOR UPDATE`, [id])).rows[0];
     if (!cur) return { ok: false, error: "Sign-up not found." };
     if (cur.status === "rejected") return { ok: true, message: `#${id} was already rejected.` };
-    if (!["new", "contacted", "approved"].includes(cur.status)) {
+    if (!["pending_verification", "new", "contacted", "approved"].includes(cur.status)) {
       return { ok: false, error: `Cannot reject a sign-up that is ${cur.status}.` };
     }
     const job = (await q(`SELECT id, status FROM provisioning_jobs WHERE signup_id = $1 AND kind = 'provision' FOR UPDATE`, [id])).rows[0];
@@ -447,5 +457,81 @@ export async function deleteNow(id: string, confirmSlug: string): Promise<Action
     await q(`INSERT INTO provisioning_events (job_id, signup_id, step, message) VALUES ($1, $2, 'delete-now', $3)`,
       [jobId, id, `Delete now requested by admin; teardown job queued`]);
     return { ok: true, message: `#${id} (${cur.slug}) is being removed. The worker deletes its service, domain, DNS and database.` };
+  });
+}
+
+// ── Email confirmation (double opt-in, see lib/verify.ts) ───────────────────────────────────────
+
+/** Unconfirmed sign-ups past their link expiry: 'verification_expired', password hash dropped. Idempotent. */
+export async function expireUnverifiedSignups(): Promise<number> {
+  const pool = getPool();
+  if (!pool) return 0;
+  await ensureSchema();
+  const { rows } = await pool.query<{ id: string }>(
+    `UPDATE club_signups SET status = 'verification_expired', password_hash = NULL, updated_at = now()
+      WHERE status = 'pending_verification' AND verify_expires_at < now()
+      RETURNING id`
+  );
+  for (const r of rows) await logEvent(r.id, "verify", "Email not confirmed in time; sign-up expired and password hash deleted");
+  return rows.length;
+}
+
+export interface ConfirmTarget { id: string; club_name: string; contact_name: string; status: SignupStatus; email_verified_at: Date | null }
+
+/** Read-only lookup for the confirmation page (GET must not change anything: mail scanners prefetch links). */
+export async function lookupConfirmToken(token: string): Promise<{ check: "ok" | "invalid" | "expired" | "used"; signup?: ConfirmTarget }> {
+  const p = parseConfirmToken(token);
+  const pool = getPool();
+  if (!p || !pool) return { check: "invalid" };
+  await ensureSchema();
+  const row = (await pool.query(`SELECT id, club_name, contact_name, email, status, email_verified_at FROM club_signups WHERE id = $1`, [p.id])).rows[0];
+  if (!row) return { check: "invalid" };
+  const check = checkConfirmToken(token, row.email);
+  if (check === "invalid") return { check };
+  const signup: ConfirmTarget = { id: row.id, club_name: row.club_name, contact_name: row.contact_name, status: row.status, email_verified_at: row.email_verified_at };
+  if (row.email_verified_at) return { check: "used", signup };
+  if (check === "expired" || row.status !== "pending_verification") return { check: "expired", signup };
+  return { check: "ok", signup };
+}
+
+export type ConfirmResult =
+  | { ok: true; already: boolean; signupId: string; clubName: string }
+  | { ok: false; reason: "invalid" | "expired" | "unavailable" };
+
+/** The confirm button (POST). pending_verification -> new. Idempotent; a second click reports "already". */
+export async function confirmSignupEmail(token: string): Promise<ConfirmResult> {
+  const p = parseConfirmToken(token);
+  if (!p || !getPool()) return { ok: false, reason: "invalid" };
+  return inTransaction(async (q) => {
+    const row = (await q(`SELECT id, club_name, email, status, email_verified_at, verify_expires_at FROM club_signups WHERE id = $1 FOR UPDATE`, [p.id])).rows[0];
+    if (!row) return { ok: false, reason: "invalid" } as const;
+    const check = checkConfirmToken(token, row.email);
+    if (check === "invalid") return { ok: false, reason: "invalid" } as const;
+    if (row.email_verified_at) return { ok: true, already: true, signupId: String(row.id), clubName: row.club_name } as const;
+    if (row.status !== "pending_verification") return { ok: false, reason: row.status === "verification_expired" ? "expired" : "unavailable" } as const;
+    if (check === "expired" || (row.verify_expires_at && new Date(row.verify_expires_at).getTime() < Date.now())) {
+      await q(`UPDATE club_signups SET status = 'verification_expired', password_hash = NULL, updated_at = now() WHERE id = $1`, [row.id]);
+      await q(`INSERT INTO provisioning_events (signup_id, step, level, message) VALUES ($1, 'verify', 'info', $2)`,
+        [row.id, "Confirmation link used after it expired; sign-up expired and password hash deleted"]);
+      return { ok: false, reason: "expired" } as const;
+    }
+    await q(`UPDATE club_signups SET status = 'new', email_verified_at = now(), updated_at = now() WHERE id = $1`, [row.id]);
+    await q(`INSERT INTO provisioning_events (signup_id, step, level, message) VALUES ($1, 'verify', 'info', $2)`,
+      [row.id, "Email address confirmed by the club"]);
+    return { ok: true, already: false, signupId: String(row.id), clubName: row.club_name } as const;
+  });
+}
+
+/** Admin: confirm by hand (e.g. the person phoned). Same transition as the link; does not approve by itself. */
+export async function adminConfirmEmail(id: string): Promise<ActionResult & { clubName?: string }> {
+  if (!/^\d+$/.test(String(id))) return { ok: false, error: "Bad sign-up id." };
+  return inTransaction(async (q) => {
+    const row = (await q(`SELECT id, club_name, status FROM club_signups WHERE id = $1 FOR UPDATE`, [id])).rows[0];
+    if (!row) return { ok: false, error: "Sign-up not found." };
+    if (row.status !== "pending_verification") return { ok: false, error: `Sign-up is ${row.status}, not awaiting confirmation.` };
+    await q(`UPDATE club_signups SET status = 'new', email_verified_at = now(), updated_at = now() WHERE id = $1`, [id]);
+    await q(`INSERT INTO provisioning_events (signup_id, step, level, message) VALUES ($1, 'verify', 'info', $2)`,
+      [id, "Email marked as confirmed by admin"]);
+    return { ok: true, message: `#${id} email marked confirmed.`, clubName: row.club_name };
   });
 }

@@ -31,8 +31,20 @@ export async function workOnce({ store, deps, config, log = console.log }) {
   }
 }
 
+/** Prints queued emails instead of sending them (EMAIL_LOG_ONLY=1, emails disabled) and marks them 'logged'. */
+export async function logQueuedEmails({ store, log = console.log }) {
+  let n = 0;
+  for (const e of await store.claimQueuedEmails()) {
+    log(`[email:logged] #${e.id} ${e.kind} to ${e.to_email ?? e.to}: ${e.subject}\n${String(e.body_text ?? e.text ?? "").split("\n").map((l) => `  | ${l}`).join("\n")}`);
+    await store.markEmail(e.id, { status: "logged" });
+    n++;
+  }
+  return n;
+}
+
 /** Sends queued outbox emails only when explicitly enabled (EMAILS_ENABLED=1 / WELCOME_EMAIL_ENABLED=1). */
 export async function sendQueuedEmails({ store, resend, config, log = console.log }) {
+  if (!config.email.enabled && config.email.logOnly) return logQueuedEmails({ store, log });
   if (!config.email.enabled || !resend) return 0;
   let sent = 0;
   for (const e of await store.claimQueuedEmails()) {
@@ -54,7 +66,7 @@ export async function sendQueuedEmails({ store, resend, config, log = console.lo
 /** The deployed loop: jobs + outbox every poll, lifecycle sweep every SWEEP_INTERVAL_MS. */
 export async function runForever({ store, deps, resend, config, log = console.log, signal }) {
   const lc = config.lifecycle;
-  log(`[worker] ${config.workerId} polling every ${config.pollIntervalMs} ms (emails ${config.email.enabled ? "ON" : "off"}; ` +
+  log(`[worker] ${config.workerId} polling every ${config.pollIntervalMs} ms (emails ${config.email.enabled ? "ON" : config.email.logOnly ? "LOG ONLY" : "off"}; ` +
     `lifecycle ${lc?.enabled ? `ON every ${lc.sweepIntervalMs} ms, trial ${config.trialDays}d, grace ${lc.graceDays}d, reminders ${lc.reminderDays.join("/")}d, teardown ${lc.teardownEnabled ? "ON" : "off"}` : "off"})`);
   let lastSweep = 0;
   while (!signal?.aborted) {

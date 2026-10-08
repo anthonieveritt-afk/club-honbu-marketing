@@ -60,7 +60,7 @@ export function planLifecycle({ signups, now, config }) {
 /** One sweep. Safe to run from several workers at once (all writes are conditional/unique). */
 export async function runLifecycleSweep({ store, config, now = Date.now(), log = console.log }) {
   const lc = config.lifecycle;
-  const out = { reminders: 0, expired: 0, teardownsQueued: 0 };
+  const out = { reminders: 0, expired: 0, teardownsQueued: 0, unconfirmedExpired: 0 };
   const ev = (signupId, step, message, level = "info") => store.logEvent({ jobId: null, signupId, step, level, message });
   const mailCtx = { upgradeUrl: config.trialUpgradeUrl, contactEmail: config.contactEmail, graceDays: lc.graceDays };
 
@@ -76,6 +76,14 @@ export async function runLifecycleSweep({ store, config, now = Date.now(), log =
         out.reminders++;
         await ev(s.id, "reminder", `Queued ${d}-day trial reminder (trial ends ${iso(s.trial_ends_at)})`);
       }
+    }
+  }
+
+  // 1b. sign-ups whose email was never confirmed (double opt-in): expire them, drop the password hash
+  if (store.expireUnverifiedSignups) {
+    for (const s of await store.expireUnverifiedSignups(now)) {
+      out.unconfirmedExpired++;
+      await ev(s.id, "verify", "Email not confirmed in time; sign-up expired and password hash deleted");
     }
   }
 
@@ -97,7 +105,7 @@ export async function runLifecycleSweep({ store, config, now = Date.now(), log =
       }
     }
   }
-  if (out.reminders || out.expired || out.teardownsQueued) log(`[lifecycle] ${JSON.stringify(out)}`);
+  if (out.reminders || out.expired || out.teardownsQueued || out.unconfirmedExpired) log(`[lifecycle] ${JSON.stringify(out)}`);
   return out;
 }
 

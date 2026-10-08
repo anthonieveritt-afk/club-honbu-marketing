@@ -4,9 +4,11 @@ What happens to a club from sign-up to removal, what has to be configured where,
 it works end to end on a throwaway sign-up **before** anything touches production or Stripe is added.
 
 ```
-/get-started ──▶ club_signups (new)
-   │  AUTO_APPROVE_SIGNUPS=1: approved at once with a unique subdomain from the club name
-   │  otherwise: Anthoni clicks Approve on /admin/signups (still works with auto-approve on)
+/get-started ──▶ club_signups (pending_verification) ──▶ email with a signed link, valid 48 h
+   │  not clicked in time ──▶ verification_expired (password hash deleted, nothing built)
+   ▼  "Confirm my email" (button on /get-started/confirm; opening the link alone changes nothing)
+new          AUTO_APPROVE_SIGNUPS=1: approved at once with a unique subdomain from the club name
+   │         otherwise: Anthoni clicks Approve on /admin/signups (still works with auto-approve on)
    ▼
 approved ──worker: provision job──▶ trial_active   (Railway service + tenant DB + DNS; TRIAL_ENDS_AT = now + 7 days)
    │  2 days and 1 day before the end: reminder emails (once each)
@@ -47,7 +49,11 @@ until that PR is merged, so the worker refuses to run live without `CLUB_SOURCE_
 |---|---|---|
 | `DATABASE_URL` | yes | HQ Postgres (Neon). The new columns/constraints are added automatically on first request (additive, idempotent). **For the test, use a separate database (a Neon branch) on a Preview deployment**, otherwise the preview migrates and writes to production. |
 | `ADMIN_PASSWORD` (12+ chars), `ADMIN_USERNAME` | yes | unchanged |
-| `AUTO_APPROVE_SIGNUPS` | optional | `1` = approve new sign-ups automatically. Off by default. Any problem (no free slug, DB error, cap reached) falls back to manual approval. |
+| `SIGNUP_VERIFY_SECRET` | for double opt-in | 32+ random chars. Turns on email confirmation: sign-ups wait as `pending_verification` until the emailed link is used. Without it nothing changes (status `new`, and auto-approve stays inactive). Needs `RESEND_FROM` (verified domain) in production, otherwise clubs never receive the link (admin can still "Mark email confirmed"). |
+| `SIGNUP_VERIFY_TTL_HOURS` | optional | link lifetime, default `48`; unconfirmed sign-ups then expire (site and worker both expire them) |
+| `SIGNUP_LOG_CONFIRM_LINKS` | staging only | `1` = write the confirmation link to the server log (no email provider yet). Ignored on Vercel production. |
+| `SIGNUP_TEST_MODE` | automated tests only | `1` = show the link on the page, only for reserved test domains (`example.com`, `*.test`, …). Ignored on Vercel production. Never set in production. |
+| `AUTO_APPROVE_SIGNUPS` | optional | `1` = approve CONFIRMED sign-ups automatically (needs `SIGNUP_VERIFY_SECRET`). Off by default. Any problem (no free slug, DB error, cap reached) falls back to manual approval. |
 | `AUTO_APPROVE_MAX_PER_DAY` | optional | default `20`; above this sign-ups wait for manual approval |
 | `TRIAL_DAYS`, `TRIAL_GRACE_DAYS`, `BASE_DOMAIN` | optional | display only on `/admin/signups` (the worker decides the real values). Keep them equal to the worker's. |
 | `RESEND_API_KEY`, `RESEND_FROM`, `SIGNUP_NOTIFY_TO`, `SIGNUP_HASH_SALT`, `SITE_URL` | as before | unchanged |
@@ -75,6 +81,7 @@ until that PR is merged, so the worker refuses to run live without `CLUB_SOURCE_
 | `TEARDOWN_ENABLED` | optional | `0` = never delete anything (expired clubs stay expired; queued teardowns wait) |
 | `DRY_RUN` | optional | `1` = read-only observe mode: prints the plan and queued jobs, never writes or calls Railway/Cloudflare |
 | `EMAILS_ENABLED` | optional | `1` to actually send welcome/reminder/ended/removed emails (`WELCOME_EMAIL_ENABLED=1` still works) |
+| `EMAIL_LOG_ONLY` | staging | `1` (with emails off) = print each queued email to the worker log and mark it `logged` (never sent later) |
 | `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_REPLY_TO` | for emails | `EMAIL_FROM` must be on a domain verified in Resend (clubhonbu.co.uk) |
 | `TRIAL_UPGRADE_URL` | optional | shown on the "trial ended" screen and in emails; empty = "Upgrade (contact us)" mailto placeholder |
 | `TRIAL_CONTACT_EMAIL` | optional | default `hello@clubhonbu.co.uk` |
@@ -159,6 +166,29 @@ Going live afterwards (separate decision): merge club-honbu `feat/trial-lifecycl
 `CLUB_SOURCE_BRANCH=main`; merge the marketing PRs; deploy the worker as a Railway service with the
 production env (real 7/7 days, `BASE_DOMAIN=clubhonbu.co.uk`), first with `DRY_RUN=1` for a day,
 then `TEARDOWN_ENABLED=0` for a week, then teardown on.
+
+## Staging on Railway: project `club-honbu-trials` (no Vercel needed)
+
+Everything for the staging test lives in one dedicated Railway project, separate from the
+Forza/JHKA/club-honbu projects:
+
+| Service | What | Source / settings |
+|---|---|---|
+| `hq-staging` | this site (HQ + `/get-started` + `/admin/signups`) | repo `club-honbu-marketing`, branch `feat/trial-lifecycle`; https://hq-staging-staging.up.railway.app |
+| `worker` | provisioning + lifecycle worker | same repo/branch, `RAILWAY_DOCKERFILE_PATH=worker/Dockerfile` |
+| `hq-postgres` | staging HQ database | Railway Postgres template |
+| `tenant-postgres` | databases of the trial clubs | Railway Postgres template, TCP proxy for `TENANT_PG_ADMIN_URL` |
+| `club-<slug>` | each trial club, created and deleted by the worker | repo `club-honbu`, branch `feat/trial-lifecycle`, `<slug>.staging.clubhonbu.co.uk` |
+
+Staging settings: `BASE_DOMAIN=staging.clubhonbu.co.uk`, `TRIAL_DAYS=0.05` (≈72 min),
+`TRIAL_GRACE_DAYS=0.02` (≈29 min), `TRIAL_REMINDER_DAYS=0.03,0.015`, `SWEEP_INTERVAL_MS=60000`,
+`EMAILS_ENABLED=0` + `EMAIL_LOG_ONLY=1` (worker emails go to the worker log), and on hq-staging
+`SIGNUP_LOG_CONFIRM_LINKS=1` (the confirmation link goes to the hq-staging log),
+`AUTO_APPROVE_SIGNUPS=1`, `AUTO_APPROVE_MAX_PER_DAY=5`. Secret values (admin password, worker
+secret, database URLs) are in Railway and in the operator's local secrets file only.
+
+To stop all spending: delete the `club-honbu-trials` project in Railway (after the worker has
+removed any test clubs, or delete their `*.staging.clubhonbu.co.uk` DNS records by hand).
 
 ## Rollback
 

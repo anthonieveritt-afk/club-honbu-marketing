@@ -201,6 +201,14 @@ export function createPgStore({ connectionString, pool } = {}) {
           WHERE j.status IN ('queued', 'running') ORDER BY j.run_after, j.id`
       )).rows;
     },
+    async expireUnverifiedSignups(now = Date.now()) {
+      return (await db.query(
+        `UPDATE club_signups SET status = 'verification_expired', password_hash = NULL, updated_at = now()
+          WHERE status = 'pending_verification' AND verify_expires_at < $1
+          RETURNING id, email`,
+        [new Date(now)]
+      )).rows;
+    },
     async claimQueuedEmails(limit = 10) {
       return (await db.query(
         `SELECT * FROM outbound_emails WHERE status = 'queued' AND attempts < 5 ORDER BY id LIMIT $1`, [limit]
@@ -252,13 +260,23 @@ export function createMemoryStore({ signups = [], jobs = [] } = {}) {
     async logEvent(e) { s.events.push(e); },
     async queueEmail(e) {
       if (s.emails.find((x) => x.signupId === e.signupId && x.kind === e.kind)) return false;
-      s.emails.push({ ...e, status: "queued" });
+      s.emails.push({ id: s.emails.length + 1, ...e, status: "queued" });
       return true;
     },
     async getJobFor(signupId, kind) {
       return [...s.jobs.values()].find((j) => String(j.signup_id) === String(signupId) && (j.kind || "provision") === kind) || null;
     },
     async claimQueuedEmails() { return s.emails.filter((e) => e.status === "queued"); },
-    async markEmail() {},
+    async markEmail(id, { status }) { const e = s.emails.find((x) => x.id === id); if (e) e.status = status; },
+    async expireUnverifiedSignups(now = Date.now()) {
+      const out = [];
+      for (const x of s.signups.values()) {
+        if (x.status === "pending_verification" && x.verify_expires_at && new Date(x.verify_expires_at).getTime() < now) {
+          Object.assign(x, { status: "verification_expired", password_hash: null });
+          out.push({ id: x.id, email: x.email });
+        }
+      }
+      return out;
+    },
   };
 }
