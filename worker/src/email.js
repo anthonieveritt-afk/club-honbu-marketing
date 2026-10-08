@@ -43,3 +43,56 @@ https://clubhonbu.co.uk`;
 <p style="font-size:12px;color:#5C5C5C">Club Honbu · clubhonbu.co.uk</p></div>`;
   return { subject: `${clubName} is ready on Club Honbu`, text, html };
 }
+
+// ── trial lifecycle emails (queued in outbound_emails; sent only when EMAILS_ENABLED=1) ──
+const ukDate = (iso) => new Date(iso).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "Europe/London" });
+const ukTime = (iso) => new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" });
+
+function wrap(title, paras) {
+  const html = `<div style="font-family:Inter,ui-sans-serif,system-ui,sans-serif;max-width:520px;margin:0 auto;color:#0A0A0A">
+<h1 style="font-size:22px">${esc(title)}</h1>
+${paras.map((p) => `<p>${p.html ?? esc(p)}</p>`).join("\n")}
+<p style="font-size:12px;color:#5C5C5C">Club Honbu · clubhonbu.co.uk</p></div>`;
+  const text = `${paras.map((p) => p.text ?? p).join("\n\n")}\n\n— The Club Honbu team\nhttps://clubhonbu.co.uk`;
+  return { html, text };
+}
+
+function upgradeLine({ upgradeUrl, contactEmail }) {
+  return upgradeUrl
+    ? { text: `Upgrade here: ${upgradeUrl}`, html: `<a href="${esc(upgradeUrl)}" style="color:#0066cc">Upgrade here</a>` }
+    : { text: `To keep using Club Honbu, just reply to this email (or write to ${contactEmail}).`, html: `To keep using Club Honbu, just reply to this email (or write to ${esc(contactEmail)}).` };
+}
+
+export function reminderEmail({ contactName, clubName, instanceUrl, trialEndsAt, daysLeft, graceDays, upgradeUrl, contactEmail }) {
+  const when = daysLeft === 1 ? "tomorrow" : `in ${daysLeft} days`;
+  const subject = `Your Club Honbu trial ends ${when}`;
+  const { html, text } = wrap(subject, [
+    `Hi ${contactName},`,
+    `The free trial for ${clubName} ends ${when}, on ${ukDate(trialEndsAt)} at ${ukTime(trialEndsAt)} (UK time).`,
+    { text: `Sign in: ${instanceUrl}/admin/login`, html: `<a href="${esc(instanceUrl)}/admin/login" style="color:#0066cc">Sign in to ${esc(clubName)}</a>` },
+    upgradeLine({ upgradeUrl, contactEmail }),
+    `If you don't upgrade, your account becomes read-only when the trial ends and everything is permanently deleted ${graceDays} days later.`,
+  ]);
+  return { subject, text, html };
+}
+
+export function expiredEmail({ contactName, clubName, trialEndsAt, teardownAfter, upgradeUrl, contactEmail }) {
+  const subject = `Your Club Honbu trial has ended`;
+  const { html, text } = wrap(subject, [
+    `Hi ${contactName},`,
+    `The free trial for ${clubName} ended on ${ukDate(trialEndsAt)}. Your account is now read-only.`,
+    `Your data is kept until ${ukDate(teardownAfter)}. After that the club, its database and its web address are permanently deleted.`,
+    upgradeLine({ upgradeUrl, contactEmail }),
+  ]);
+  return { subject, text, html };
+}
+
+export function removedEmail({ contactName, clubName, contactEmail }) {
+  const subject = `Your Club Honbu trial club has been deleted`;
+  const { html, text } = wrap(subject, [
+    `Hi ${contactName},`,
+    `As scheduled, the trial club ${clubName} and all of its data have now been permanently deleted from Club Honbu.`,
+    `Thanks for trying Club Honbu. If you'd like to start again, reply to this email or write to ${contactEmail}.`,
+  ]);
+  return { subject, text, html };
+}

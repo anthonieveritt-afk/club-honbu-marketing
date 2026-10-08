@@ -2,7 +2,7 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { getPool } from "./db";
 import { SCHEMA_SQL } from "./schema";
-import { isValidSlug } from "./slug";
+import { isValidSlug, slugCandidates } from "./slug";
 
 export type SignupStatus =
   | "new"
@@ -12,7 +12,9 @@ export type SignupStatus =
   | "trial_active"
   | "converted"
   | "expired"
-  | "rejected";
+  | "rejected"
+  | "removing"
+  | "removed";
 
 export interface SignupRow {
   id: string;
@@ -36,7 +38,24 @@ export interface SignupRow {
   job_step: string | null;
   job_attempts: number | null;
   job_error: string | null;
+  auto_approved: boolean;
+  expired_at: Date | null;
+  teardown_after: Date | null;
+  converted_at: Date | null;
+  removal_requested_at: Date | null;
+  removed_at: Date | null;
+  trial_extended_days: number;
+  teardown_status: JobStatus | null;
+  teardown_step: string | null;
+  teardown_error: string | null;
+  sync_status: JobStatus | null;
+  sync_error: string | null;
+  last_event: string | null;
+  last_event_level: "info" | "warn" | "error" | null;
+  last_event_at: Date | null;
 }
+
+type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 // Rate limits (per salted IP hash / per email address).
 export const LIMITS = {
@@ -136,10 +155,19 @@ export async function listSignups(limit = 500): Promise<SignupRow[]> {
     `SELECT s.id, s.created_at, s.club_name, s.sport_type, s.contact_name, s.email, s.website,
             s.admin_username, s.status, s.notified_at, s.slug, s.decided_at, s.rejected_reason,
             s.instance_url, s.railway_url, s.trial_ends_at,
+            s.auto_approved, s.expired_at, s.teardown_after, s.converted_at, s.removal_requested_at,
+            s.removed_at, s.trial_extended_days,
             j.id AS job_id, j.status AS job_status, j.current_step AS job_step,
-            j.attempts AS job_attempts, j.last_error AS job_error
+            j.attempts AS job_attempts, j.last_error AS job_error,
+            t.status AS teardown_status, t.current_step AS teardown_step, t.last_error AS teardown_error,
+            y.status AS sync_status, y.last_error AS sync_error,
+            e.message AS last_event, e.level AS last_event_level, e.created_at AS last_event_at
        FROM club_signups s
        LEFT JOIN provisioning_jobs j ON j.signup_id = s.id AND j.kind = 'provision'
+       LEFT JOIN provisioning_jobs t ON t.signup_id = s.id AND t.kind = 'teardown'
+       LEFT JOIN provisioning_jobs y ON y.signup_id = s.id AND y.kind = 'sync_trial'
+       LEFT JOIN LATERAL (SELECT message, level, created_at FROM provisioning_events
+                           WHERE signup_id = s.id ORDER BY created_at DESC, id DESC LIMIT 1) e ON true
       ORDER BY s.created_at DESC, s.id DESC
       LIMIT $1`,
     [limit]
@@ -244,18 +272,180 @@ export async function rejectSignup(id: string, reason: string): Promise<ActionRe
 }
 
 /** failed job → queued again (resumes from the failed step; the worker keeps its state). */
-export async function retryJob(id: string): Promise<ActionResult> {
+export async function retryJob(id: string, kind: "provision" | "teardown" | "sync_trial" = "provision"): Promise<ActionResult> {
   if (!/^\d+$/.test(String(id))) return { ok: false, error: "Bad sign-up id." };
+  if (!["provision", "teardown", "sync_trial"].includes(kind)) return { ok: false, error: "Bad job kind." };
   return inTransaction(async (q) => {
     const r = await q(
       `UPDATE provisioning_jobs SET status = 'queued', attempts = 0, run_after = now(), finished_at = NULL,
               updated_at = now()
-        WHERE signup_id = $1 AND kind = 'provision' AND status = 'failed' RETURNING id`,
-      [id]
+        WHERE signup_id = $1 AND kind = $2 AND status = 'failed' RETURNING id`,
+      [id, kind]
     );
     if (!r.rowCount) return { ok: false, error: "No failed job to retry." };
-    await q(`INSERT INTO provisioning_events (job_id, signup_id, step, message) VALUES ($1, $2, 'retry', 'Retry requested by admin')`,
-      [r.rows[0].id, id]);
-    return { ok: true, message: `Job for #${id} re-queued.` };
+    await q(`INSERT INTO provisioning_events (job_id, signup_id, step, message) VALUES ($1, $2, 'retry', $3)`,
+      [r.rows[0].id, id, `Retry of ${kind} requested by admin`]);
+    return { ok: true, message: `${kind === "provision" ? "Job" : kind === "teardown" ? "Teardown" : "Trial sync"} for #${id} re-queued.` };
+  });
+}
+
+// ── Auto-approve (AUTO_APPROVE_SIGNUPS=1) ───────────────────────────────────────────────────────
+
+export function autoApproveEnabled(): boolean {
+  return /^(1|true|yes|on)$/i.test(process.env.AUTO_APPROVE_SIGNUPS || "");
+}
+const AUTO_APPROVE_MAX_PER_DAY = () => Number(process.env.AUTO_APPROVE_MAX_PER_DAY || 20);
+
+/**
+ * Approves a fresh sign-up with a unique subdomain derived from the club name, so the worker
+ * provisions it straight away. Same code path as the manual Approve button. If anything is off
+ * (daily cap reached, no usable subdomain, DB error) the sign-up simply stays "new" for a person.
+ */
+export async function autoApproveSignup(id: string, clubName: string): Promise<ActionResult> {
+  const pool = getPool();
+  if (!pool) return { ok: false, error: "DATABASE_URL is not set" };
+  await ensureSchema();
+  const recent = await pool.query<{ n: string }>(
+    `SELECT count(*) AS n FROM club_signups WHERE auto_approved AND decided_at > now() - interval '1 day'`
+  );
+  if (Number(recent.rows[0].n) >= AUTO_APPROVE_MAX_PER_DAY()) {
+    await logEvent(id, "auto-approve", `Daily auto-approve cap (${AUTO_APPROVE_MAX_PER_DAY()}) reached; left for manual approval`, "warn");
+    return { ok: false, error: "Auto-approve daily cap reached." };
+  }
+  const taken = new Set(
+    (await pool.query<{ slug: string }>(`SELECT slug FROM club_signups WHERE slug IS NOT NULL AND id <> $1`, [id])).rows.map((r) => r.slug)
+  );
+  for (const slug of slugCandidates(clubName, id)) {
+    if (taken.has(slug)) continue;
+    const r = await approveSignup(id, slug);
+    if (r.ok) {
+      await pool.query(`UPDATE club_signups SET auto_approved = true, updated_at = now() WHERE id = $1 AND slug = $2`, [id, slug]);
+      await logEvent(id, "auto-approve", `Auto-approved as ${slug} (AUTO_APPROVE_SIGNUPS)`);
+      return { ok: true, message: `Auto-approved as ${slug}` };
+    }
+    if (!/already (used|taken)/.test(r.error)) {
+      await logEvent(id, "auto-approve", `Auto-approve failed: ${r.error}`, "warn");
+      return r;
+    }
+    taken.add(slug); // lost a race for this subdomain: try the next candidate
+  }
+  await logEvent(id, "auto-approve", "No free subdomain found; left for manual approval", "warn");
+  return { ok: false, error: "No free subdomain found." };
+}
+
+async function logEvent(signupId: string, step: string, message: string, level: "info" | "warn" | "error" = "info") {
+  const pool = getPool();
+  if (!pool) return;
+  await pool.query(`INSERT INTO provisioning_events (signup_id, step, level, message) VALUES ($1, $2, $3, $4)`, [signupId, step, level, message]);
+}
+
+// ── Trial lifecycle admin actions ───────────────────────────────────────────────────────────────
+// They only change club_signups and queue jobs; the worker does the Railway/Cloudflare/Postgres work.
+
+const MAX_EXTEND_DAYS = 60;
+
+async function queueJob(q: (sql: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount: number | null }>, id: string, kind: string, requeueFrom: string[]) {
+  return (await q(
+    `INSERT INTO provisioning_jobs (signup_id, kind) VALUES ($1, $2)
+     ON CONFLICT (signup_id, kind) DO UPDATE
+        SET status = 'queued', attempts = 0, run_after = now(), state = '{}'::jsonb, last_error = NULL,
+            finished_at = NULL, locked_by = NULL, locked_until = NULL, current_step = NULL, updated_at = now()
+      WHERE provisioning_jobs.status = ANY($3::text[])
+     RETURNING id`,
+    [id, kind, requeueFrom]
+  )).rows[0]?.id ?? null;
+}
+
+/** Cancels a teardown that hasn't started yet. Returns an error string if it already started. */
+async function stopPendingTeardown(q: (sql: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount: number | null }>, id: string): Promise<string | null> {
+  const t = (await q(`SELECT id, status, state FROM provisioning_jobs WHERE signup_id = $1 AND kind = 'teardown' FOR UPDATE`, [id])).rows[0];
+  if (!t) return null;
+  const started = t.status === "running" || t.status === "succeeded" || Object.keys(t.state?.done || {}).length > 0;
+  if (started) return `Removal has already started (teardown ${t.status}); it can't be stopped from here.`;
+  if (t.status !== "cancelled") {
+    await q(`UPDATE provisioning_jobs SET status = 'cancelled', last_error = 'Cancelled by admin', finished_at = now(), updated_at = now() WHERE id = $1`, [t.id]);
+  }
+  return null;
+}
+
+/** trial_active/expired (or removing before teardown starts) → trial_active with a later end. */
+export async function extendTrial(id: string, rawDays: string | number): Promise<ActionResult> {
+  if (!/^\d+$/.test(String(id))) return { ok: false, error: "Bad sign-up id." };
+  const days = Number(rawDays);
+  if (!Number.isInteger(days) || days < 1 || days > MAX_EXTEND_DAYS) return { ok: false, error: `Extend by 1–${MAX_EXTEND_DAYS} whole days.` };
+  return inTransaction(async (q) => {
+    const cur = (await q(`SELECT id, status, trial_ends_at, converted_at FROM club_signups WHERE id = $1 FOR UPDATE`, [id])).rows[0];
+    if (!cur) return { ok: false, error: "Sign-up not found." };
+    if (!["trial_active", "expired", "removing"].includes(cur.status) || !cur.trial_ends_at) {
+      return { ok: false, error: `Cannot extend a sign-up that is ${cur.status}.` };
+    }
+    const blocked = await stopPendingTeardown(q, id);
+    if (blocked) return { ok: false, error: blocked };
+    // From the later of the current end and now, so extending an expired trial gives real days.
+    const upd = (await q(
+      `UPDATE club_signups
+          SET trial_ends_at = GREATEST(trial_ends_at, now()) + ($2::numeric * interval '24 hours'),
+              status = 'trial_active', expired_at = NULL, teardown_after = NULL, removal_requested_at = NULL,
+              trial_extended_days = trial_extended_days + $2::int, updated_at = now()
+        WHERE id = $1 RETURNING trial_ends_at`,
+      [id, String(days)]
+    )).rows[0];
+    const jobId = await queueJob(q, id, "sync_trial", ["queued", "succeeded", "failed", "cancelled"]);
+    const ends = new Date(upd.trial_ends_at).toISOString();
+    await q(`INSERT INTO provisioning_events (job_id, signup_id, step, message) VALUES ($1, $2, 'extend', $3)`,
+      [jobId, id, `Trial extended by ${days} day(s) to ${ends} by admin${jobId ? "; sync job queued" : " (sync job already running; it re-checks)"}`]);
+    return { ok: true, message: `Extended #${id} by ${days} day(s). New end: ${ends}.` };
+  });
+}
+
+/** Paying club (handled outside the system for now): never torn down, trial vars removed from the instance. */
+export async function markConverted(id: string): Promise<ActionResult> {
+  if (!/^\d+$/.test(String(id))) return { ok: false, error: "Bad sign-up id." };
+  return inTransaction(async (q) => {
+    const cur = (await q(`SELECT id, status FROM club_signups WHERE id = $1 FOR UPDATE`, [id])).rows[0];
+    if (!cur) return { ok: false, error: "Sign-up not found." };
+    if (cur.status === "converted") return { ok: true, message: `#${id} is already converted.` };
+    if (!["trial_active", "expired", "removing"].includes(cur.status)) {
+      return { ok: false, error: `Cannot mark a sign-up that is ${cur.status} as converted.` };
+    }
+    const blocked = await stopPendingTeardown(q, id);
+    if (blocked) return { ok: false, error: blocked };
+    await q(
+      `UPDATE club_signups SET status = 'converted', converted_at = now(), teardown_after = NULL,
+              removal_requested_at = NULL, updated_at = now() WHERE id = $1`,
+      [id]
+    );
+    const jobId = await queueJob(q, id, "sync_trial", ["queued", "succeeded", "failed", "cancelled"]);
+    await q(`INSERT INTO provisioning_events (job_id, signup_id, step, message) VALUES ($1, $2, 'convert', $3)`,
+      [jobId, id, "Marked converted by admin: will never be torn down; trial limits removed from the instance"]);
+    return { ok: true, message: `#${id} marked converted. It will never be removed automatically.` };
+  });
+}
+
+/** Start teardown immediately (skips the rest of the trial and the grace period). Needs the subdomain typed in. */
+export async function deleteNow(id: string, confirmSlug: string): Promise<ActionResult> {
+  if (!/^\d+$/.test(String(id))) return { ok: false, error: "Bad sign-up id." };
+  return inTransaction(async (q) => {
+    const cur = (await q(`SELECT id, status, slug, converted_at FROM club_signups WHERE id = $1 FOR UPDATE`, [id])).rows[0];
+    if (!cur) return { ok: false, error: "Sign-up not found." };
+    if (cur.converted_at || cur.status === "converted") return { ok: false, error: "Converted clubs are never deleted from here." };
+    if (cur.status === "removing" || cur.status === "removed") return { ok: true, message: `#${id} is already ${cur.status}.` };
+    const prov = (await q(`SELECT status FROM provisioning_jobs WHERE signup_id = $1 AND kind = 'provision'`, [id])).rows[0];
+    const halfBuilt = cur.status === "provisioning" && prov?.status === "failed";
+    if (!["trial_active", "expired"].includes(cur.status) && !halfBuilt) {
+      return { ok: false, error: `Cannot delete a sign-up that is ${cur.status}.` };
+    }
+    if (String(confirmSlug || "").trim().toLowerCase() !== cur.slug) {
+      return { ok: false, error: `Type the subdomain (${cur.slug}) to confirm deletion.` };
+    }
+    await q(
+      `UPDATE club_signups SET status = 'removing', removal_requested_at = now(), teardown_after = now(),
+              updated_at = now() WHERE id = $1`,
+      [id]
+    );
+    const jobId = await queueJob(q, id, "teardown", ["cancelled", "failed"]);
+    await q(`INSERT INTO provisioning_events (job_id, signup_id, step, message) VALUES ($1, $2, 'delete-now', $3)`,
+      [jobId, id, `Delete now requested by admin; teardown job queued`]);
+    return { ok: true, message: `#${id} (${cur.slug}) is being removed. The worker deletes its service, domain, DNS and database.` };
   });
 }

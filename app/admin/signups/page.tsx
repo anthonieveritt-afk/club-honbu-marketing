@@ -2,9 +2,9 @@ import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { isAdminAuthorized } from "@/lib/admin-auth";
-import { listSignups, type SignupRow } from "@/lib/signups";
+import { listSignups, autoApproveEnabled, type SignupRow } from "@/lib/signups";
 import { suggestSlug } from "@/lib/slug";
-import { approveAction, rejectAction, retryAction } from "./actions";
+import { approveAction, rejectAction, retryAction, extendAction, convertAction, deleteNowAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -20,19 +20,26 @@ const fmt = new Intl.DateTimeFormat("en-GB", {
   timeStyle: "short",
 });
 
-const fmtDate = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", dateStyle: "medium" });
 const BASE_DOMAIN = process.env.BASE_DOMAIN || "clubhonbu.co.uk";
+// Display only; the worker's TRIAL_DAYS / TRIAL_GRACE_DAYS are what count. Keep them in step.
+const TRIAL_DAYS = Number(process.env.TRIAL_DAYS || 7);
+const GRACE_DAYS = Number(process.env.TRIAL_GRACE_DAYS || 7);
 
 const btn = "rounded-lg px-3 py-1.5 text-xs font-medium";
 
 function Provisioning({ r }: { r: SignupRow }) {
   if (r.instance_url) {
+    const gone = r.status === "removed";
     return (
       <div className="space-y-1">
-        <a className="text-accent hover:underline" href={r.instance_url} target="_blank" rel="noopener noreferrer" data-testid="instance-url">
-          {r.instance_url.replace(/^https?:\/\//, "")}
-        </a>
-        {r.trial_ends_at && <div className="text-xs text-muted">Trial ends {fmtDate.format(new Date(r.trial_ends_at))}</div>}
+        {gone ? (
+          <span className="font-mono text-xs text-muted line-through" data-testid="instance-url">{r.instance_url.replace(/^https?:\/\//, "")}</span>
+        ) : (
+          <a className="text-accent hover:underline" href={r.instance_url} target="_blank" rel="noopener noreferrer" data-testid="instance-url">
+            {r.instance_url.replace(/^https?:\/\//, "")}
+          </a>
+        )}
+        <Lifecycle r={r} />
       </div>
     );
   }
@@ -46,6 +53,34 @@ function Provisioning({ r }: { r: SignupRow }) {
       </div>
       {r.slug && <div className="font-mono text-xs text-muted">{r.slug}.{BASE_DOMAIN}</div>}
       {r.job_error && <div className="max-w-xs break-words text-xs text-red-700">{r.job_error}</div>}
+      {r.auto_approved && <div className="text-xs text-muted">auto-approved</div>}
+    </div>
+  );
+}
+
+function Lifecycle({ r }: { r: SignupRow }) {
+  const d = (v: Date | null) => (v ? fmt.format(new Date(v)) : "");
+  return (
+    <div className="space-y-0.5 text-xs text-muted" data-testid="lifecycle">
+      {r.status === "trial_active" && r.trial_ends_at && <div>Trial ends {d(r.trial_ends_at)}</div>}
+      {r.status === "expired" && <div className="text-amber-700">Expired {d(r.expired_at)} · deleted after {d(r.teardown_after)}</div>}
+      {r.status === "converted" && <div className="text-emerald-700">Converted {d(r.converted_at)} · never removed automatically</div>}
+      {r.status === "removing" && (
+        <div className="text-red-700">
+          Removing (requested {d(r.removal_requested_at)}) · teardown {r.teardown_status || "pending"}{r.teardown_step ? ` · ${r.teardown_step}` : ""}
+        </div>
+      )}
+      {r.status === "removed" && <div>Removed {d(r.removed_at)}</div>}
+      {r.trial_extended_days > 0 && <div>Extended by {r.trial_extended_days} day(s) in total</div>}
+      {r.auto_approved && <div>auto-approved</div>}
+      {r.sync_status && r.sync_status !== "succeeded" && r.sync_status !== "cancelled" && <div>Instance update: {r.sync_status}</div>}
+      {r.teardown_error && r.teardown_status === "failed" && <div className="max-w-xs break-words text-red-700">{r.teardown_error}</div>}
+      {r.sync_error && r.sync_status === "failed" && <div className="max-w-xs break-words text-red-700">{r.sync_error}</div>}
+      {r.last_event && (
+        <div className={`max-w-xs break-words ${r.last_event_level === "error" ? "text-red-700" : r.last_event_level === "warn" ? "text-amber-700" : ""}`} data-testid="last-event">
+          Last: {r.last_event}
+        </div>
+      )}
     </div>
   );
 }
@@ -53,6 +88,11 @@ function Provisioning({ r }: { r: SignupRow }) {
 function Actions({ r }: { r: SignupRow }) {
   const canDecide = r.status === "new" || r.status === "contacted";
   const canReject = canDecide || (r.status === "approved" && (r.job_status === "queued" || !r.job_status));
+  // Extend/convert can still stop a removal that hasn't started a single step yet.
+  const teardownPending = r.status === "removing" && !r.teardown_step && (!r.teardown_status || r.teardown_status === "queued" || r.teardown_status === "cancelled");
+  const canExtend = r.status === "trial_active" || r.status === "expired" || teardownPending;
+  const canConvert = canExtend;
+  const canDelete = r.status === "trial_active" || r.status === "expired" || (r.status === "provisioning" && r.job_status === "failed");
   return (
     <div className="flex min-w-[16rem] flex-col gap-2">
       {canDecide && (
@@ -83,6 +123,43 @@ function Actions({ r }: { r: SignupRow }) {
         <form action={retryAction} data-testid="retry-form">
           <input type="hidden" name="id" value={r.id} />
           <button type="submit" className={`${btn} border border-line hover:bg-black/5`}>Retry provisioning</button>
+        </form>
+      )}
+      {canExtend && (
+        <form action={extendAction} className="flex items-center gap-1" data-testid="extend-form">
+          <input type="hidden" name="id" value={r.id} />
+          <input name="days" type="number" min={1} max={60} defaultValue={7} required aria-label="Days to extend"
+            className="w-16 rounded-lg border border-line px-2 py-1 text-xs" />
+          <span className="text-xs text-muted">days</span>
+          <button type="submit" className={`${btn} border border-line hover:bg-black/5`}>Extend trial</button>
+        </form>
+      )}
+      {canConvert && (
+        <form action={convertAction} data-testid="convert-form">
+          <input type="hidden" name="id" value={r.id} />
+          <button type="submit" className={`${btn} bg-emerald-600 text-white hover:bg-emerald-700`}>Mark converted</button>
+        </form>
+      )}
+      {canDelete && r.slug && (
+        <form action={deleteNowAction} className="flex items-center gap-1" data-testid="delete-form">
+          <input type="hidden" name="id" value={r.id} />
+          <input name="confirm" placeholder={`type ${r.slug}`} aria-label="Type the subdomain to confirm" autoComplete="off"
+            className="w-36 rounded-lg border border-line px-2 py-1 font-mono text-xs" />
+          <button type="submit" className={`${btn} border border-red-300 text-red-700 hover:bg-red-50`}>Delete now</button>
+        </form>
+      )}
+      {r.teardown_status === "failed" && (
+        <form action={retryAction} data-testid="retry-teardown-form">
+          <input type="hidden" name="id" value={r.id} />
+          <input type="hidden" name="kind" value="teardown" />
+          <button type="submit" className={`${btn} border border-line hover:bg-black/5`}>Retry removal</button>
+        </form>
+      )}
+      {r.sync_status === "failed" && (
+        <form action={retryAction} data-testid="retry-sync-form">
+          <input type="hidden" name="id" value={r.id} />
+          <input type="hidden" name="kind" value="sync_trial" />
+          <button type="submit" className={`${btn} border border-line hover:bg-black/5`}>Retry instance update</button>
         </form>
       )}
       {r.status === "rejected" && r.rejected_reason && <span className="text-xs text-muted">{r.rejected_reason}</span>}
@@ -127,6 +204,9 @@ export default async function AdminSignupsPage({
       <p className="mt-2 text-sm text-muted">
         Approve queues a provisioning job; the HQ worker picks it up and builds the club&apos;s trial
         instance (nothing is created from this website directly).
+        {autoApproveEnabled() ? " Auto-approve is ON: new sign-ups are approved with a subdomain from the club name." : ""}
+        {" "}Trials last {TRIAL_DAYS} days, then the club is read-only for {GRACE_DAYS} days and deleted unless it is
+        extended or marked converted.
       </p>
       {error && (
         <p className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">

@@ -100,12 +100,106 @@ export function createPgStore({ connectionString, pool } = {}) {
     },
 
     // ── email outbox ──
+    /** Idempotent per (signup, kind). Returns true if this call queued it. */
     async queueEmail({ signupId, kind, to, subject, text, html }) {
-      await db.query(
+      const r = await db.query(
         `INSERT INTO outbound_emails (signup_id, kind, to_email, subject, body_text, body_html)
-         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (signup_id, kind) DO NOTHING`,
+         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (signup_id, kind) DO NOTHING RETURNING id`,
         [signupId, kind, to, subject, text, html]
       );
+      return r.rowCount > 0;
+    },
+
+    // ── trial lifecycle ──
+    async getJobFor(signupId, kind) {
+      return (await db.query(`SELECT * FROM provisioning_jobs WHERE signup_id = $1 AND kind = $2`, [signupId, kind])).rows[0] || null;
+    },
+    /**
+     * One job per (signup, kind). Creates it, or re-queues it if it is in one of `requeueFrom`
+     * (never touches a running job). Returns { id, status } or null if left alone.
+     */
+    async enqueueJob(signupId, kind, { requeueFrom = ["cancelled"] } = {}) {
+      const r = await db.query(
+        `INSERT INTO provisioning_jobs (signup_id, kind) VALUES ($1, $2)
+         ON CONFLICT (signup_id, kind) DO UPDATE
+            SET status = 'queued', attempts = 0, run_after = now(), state = '{}'::jsonb, last_error = NULL,
+                finished_at = NULL, locked_by = NULL, locked_until = NULL, current_step = NULL, updated_at = now()
+          WHERE provisioning_jobs.status = ANY($3::text[])
+         RETURNING id, status`,
+        [signupId, kind, requeueFrom]
+      );
+      return r.rows[0] || null;
+    },
+    async cancelJob(jobId, reason) {
+      await db.query(
+        `UPDATE provisioning_jobs SET status = 'cancelled', last_error = $2, locked_by = NULL, locked_until = NULL,
+                finished_at = now(), updated_at = now() WHERE id = $1`,
+        [jobId, String(reason).slice(0, 2000)]
+      );
+    },
+    /** trial_active sign-ups whose trial ends within `withinDays` (reminder candidates). */
+    async listEndingTrials(now, withinDays) {
+      return (await db.query(
+        `SELECT * FROM club_signups
+          WHERE status = 'trial_active' AND trial_ends_at IS NOT NULL
+            AND trial_ends_at > $1 AND trial_ends_at <= $1 + ($2::numeric * interval '24 hours')
+          ORDER BY trial_ends_at, id`,
+        [new Date(now), String(withinDays)]
+      )).rows;
+    },
+    /** Atomically moves every trial past its end to 'expired' and schedules teardown. */
+    async expireDueTrials(now, graceDays) {
+      return (await db.query(
+        `UPDATE club_signups
+            SET status = 'expired', expired_at = $1,
+                teardown_after = trial_ends_at + ($2::numeric * interval '24 hours'), updated_at = now()
+          WHERE status = 'trial_active' AND trial_ends_at IS NOT NULL AND trial_ends_at <= $1
+            AND converted_at IS NULL
+          RETURNING *`,
+        [new Date(now), String(graceDays)]
+      )).rows;
+    },
+    /** Expired, never converted, grace period over. */
+    async listDueTeardowns(now) {
+      return (await db.query(
+        `SELECT * FROM club_signups
+          WHERE status = 'expired' AND converted_at IS NULL
+            AND teardown_after IS NOT NULL AND teardown_after <= $1
+          ORDER BY teardown_after, id`,
+        [new Date(now)]
+      )).rows;
+    },
+    /** The teardown point of no return. Refuses converted clubs and anything not expired/removing. */
+    async markSignupRemoving(id, now) {
+      const r = await db.query(
+        `UPDATE club_signups
+            SET status = 'removing', removal_requested_at = COALESCE(removal_requested_at, $2), updated_at = now()
+          WHERE id = $1 AND status IN ('expired', 'removing') AND converted_at IS NULL
+            AND (status = 'removing' OR teardown_after <= $2)
+          RETURNING *`,
+        [id, new Date(now)]
+      );
+      return r.rows[0] || null;
+    },
+    async markSignupRemoved(id, now) {
+      await db.query(
+        `UPDATE club_signups SET status = 'removed', removed_at = COALESCE(removed_at, $2), updated_at = now()
+          WHERE id = $1 AND status = 'removing'`,
+        [id, new Date(now)]
+      );
+    },
+    /** Read-only overview for DRY_RUN / observe mode. */
+    async listLifecycleCandidates() {
+      return (await db.query(
+        `SELECT * FROM club_signups WHERE status IN ('trial_active', 'expired', 'removing') ORDER BY id`
+      )).rows;
+    },
+    async listQueuedJobs() {
+      return (await db.query(
+        `SELECT j.id, j.kind, j.status, j.signup_id, s.club_name, s.slug FROM provisioning_jobs j
+           JOIN club_signups s ON s.id = j.signup_id
+          WHERE j.status IN ('queued', 'running') ORDER BY j.run_after, j.id`
+      )).rows;
     },
     async claimQueuedEmails(limit = 10) {
       return (await db.query(
@@ -157,7 +251,12 @@ export function createMemoryStore({ signups = [], jobs = [] } = {}) {
     },
     async logEvent(e) { s.events.push(e); },
     async queueEmail(e) {
-      if (!s.emails.find((x) => x.signupId === e.signupId && x.kind === e.kind)) s.emails.push({ ...e, status: "queued" });
+      if (s.emails.find((x) => x.signupId === e.signupId && x.kind === e.kind)) return false;
+      s.emails.push({ ...e, status: "queued" });
+      return true;
+    },
+    async getJobFor(signupId, kind) {
+      return [...s.jobs.values()].find((j) => String(j.signup_id) === String(signupId) && (j.kind || "provision") === kind) || null;
     },
     async claimQueuedEmails() { return s.emails.filter((e) => e.status === "queued"); },
     async markEmail() {},

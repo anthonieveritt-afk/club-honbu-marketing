@@ -1,9 +1,16 @@
 #!/usr/bin/env node
 // Usage:
-//   node src/cli.js run                 poll provisioning_jobs forever (live)
-//   node src/cli.js once                run at most one job, then exit (live)
-//   node src/cli.js dry-run <signupId>  read one sign-up from the HQ DB and print every action the
-//                                       job WOULD take, using in-memory fakes. Writes nothing anywhere.
+//   node src/cli.js run                     poll jobs + lifecycle sweep forever (live; the deployed mode)
+//   node src/cli.js once                    run at most one job, then exit (live)
+//   node src/cli.js sweep                   run ONE lifecycle sweep (reminders/expiry/queue teardowns), then exit
+//   node src/cli.js plan                    print what the lifecycle sweep would do now. Read-only.
+//   node src/cli.js dry-run <signupId>      print every call provisioning WOULD make, using in-memory fakes. Writes nothing.
+//   node src/cli.js teardown-plan <signupId>  look up the club's REAL Railway service, custom domain, DNS records and
+//                                           database (read-only calls) and print exactly what teardown would delete.
+//                                           Deletes nothing, writes nothing.
+//
+// DRY_RUN=1 makes `run`/`once`/`sweep` read-only "observe" mode: they print the lifecycle plan and the
+// queued jobs and never claim a job, write to the HQ database or call Railway/Cloudflare/Postgres admin.
 import { loadConfig, assertLiveConfig } from "./config.js";
 import { createPgStore, createMemoryStore } from "./store.js";
 import { createRailwayClient } from "./railway.js";
@@ -13,15 +20,41 @@ import { createResendClient } from "./email.js";
 import { httpStatus } from "./http.js";
 import { runProvisionJob } from "./provision.js";
 import { workOnce, runForever } from "./worker.js";
+import { planLifecycle, runLifecycleSweep, runTeardownJob, dryRunDeps, readOnlyStore } from "./lifecycle.js";
 import { createFakeRailway, createFakeCloudflare, createFakeTenantDb, createFakeHttp } from "./fakes.js";
 
 const [cmd, arg] = process.argv.slice(2);
 const config = loadConfig();
+const need = (cond, msg) => { if (!cond) { console.error(msg); process.exit(2); } };
 
-if (cmd === "dry-run" || (config.dryRun && cmd !== "help")) {
+async function printPlan(store) {
+  const now = Date.now();
+  const plan = planLifecycle({ signups: await store.listLifecycleCandidates(), now, config });
+  console.log(`[plan ${new Date(now).toISOString()}] trial ${config.trialDays}d, grace ${config.lifecycle.graceDays}d, reminders ${config.lifecycle.reminderDays.join("/")}d, teardown ${config.lifecycle.teardownEnabled ? "ON" : "off"}`);
+  if (!plan.length) console.log("  nothing due");
+  for (const p of plan) {
+    const s = p.signup;
+    const who = `#${s.id} ${s.club_name} (${s.slug || "no slug"})`;
+    if (p.action === "remind") console.log(`  would queue ${p.days}-day reminder to ${s.email} for ${who}, trial ends ${new Date(s.trial_ends_at).toISOString()}`);
+    if (p.action === "expire") console.log(`  would mark ${who} expired; teardown after ${p.teardownAfter}`);
+    if (p.action === "teardown") console.log(`  would queue teardown for ${who} (grace ended ${new Date(s.teardown_after).toISOString()})`);
+  }
+  for (const j of await store.listQueuedJobs()) console.log(`  job ${j.id} ${j.kind} ${j.status} for #${j.signup_id} ${j.club_name}`);
+}
+
+function liveDeps() {
+  return {
+    railway: createRailwayClient(config.railway),
+    cloudflare: createCloudflareClient(config.cloudflare),
+    tenantDb: createTenantDb({ adminUrl: config.tenantDb.adminUrl }),
+    httpStatus, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
+  };
+}
+
+if (cmd === "dry-run") {
   const signupId = arg;
-  if (!signupId) { console.error("dry-run needs a signup id"); process.exit(2); }
-  if (!config.hqDatabaseUrl) { console.error("HQ_DATABASE_URL is required (read-only use)"); process.exit(2); }
+  need(signupId, "dry-run needs a signup id");
+  need(config.hqDatabaseUrl, "HQ_DATABASE_URL is required (read-only use)");
   const pg = createPgStore({ connectionString: config.hqDatabaseUrl });
   const signup = await pg.getSignup(signupId);
   await pg.end();
@@ -29,7 +62,7 @@ if (cmd === "dry-run" || (config.dryRun && cmd !== "help")) {
   const dryConfig = {
     ...config,
     workerSecret: config.workerSecret || "dry-run-secret-dry-run-secret-0000",
-    railway: { ...config.railway, projectId: config.railway.projectId || "<TENANT_PROJECT_ID>", environmentId: config.railway.environmentId || "<TENANT_ENVIRONMENT_ID>" },
+    railway: { ...config.railway, projectId: config.railway.projectId || "<TENANT_PROJECT_ID>", environmentId: config.railway.environmentId || "<TENANT_ENVIRONMENT_ID>", sourceBranch: config.railway.sourceBranch || "<CLUB_SOURCE_BRANCH>" },
     health: { ...config.health, intervalMs: 0 },
   };
   const log = (m) => console.log(`  would call: ${m}`);
@@ -53,18 +86,51 @@ if (cmd === "dry-run" || (config.dryRun && cmd !== "help")) {
     process.exit(1);
   }
   process.exit(0);
-}
-
-if (cmd === "run" || cmd === "once") {
+} else if (cmd === "plan" || (config.dryRun && ["run", "once", "sweep"].includes(cmd))) {
+  need(config.hqDatabaseUrl, "HQ_DATABASE_URL is required (read-only use)");
+  const store = createPgStore({ connectionString: config.hqDatabaseUrl });
+  console.log("DRY RUN / observe mode: read-only, no job is claimed and nothing is written or deleted.");
+  if (cmd === "run") {
+    const ac = new AbortController();
+    process.on("SIGTERM", () => ac.abort());
+    while (!ac.signal.aborted) {
+      await printPlan(store).catch((e) => console.error(`plan failed: ${e.message}`));
+      await new Promise((r) => setTimeout(r, config.lifecycle.sweepIntervalMs));
+    }
+  } else {
+    await printPlan(store);
+  }
+  await store.end();
+} else if (cmd === "teardown-plan") {
+  need(arg, "teardown-plan needs a signup id");
+  assertLiveConfig(config);
+  const pg = createPgStore({ connectionString: config.hqDatabaseUrl });
+  const signup = await pg.getSignup(arg);
+  if (!signup) { console.error(`signup ${arg} not found`); process.exit(1); }
+  console.log(`TEARDOWN PLAN for #${signup.id} "${signup.club_name}" (status ${signup.status}, slug ${signup.slug}). Read-only: nothing is deleted.`);
+  if (signup.status !== "removing" && !(signup.status === "expired" && signup.teardown_after && new Date(signup.teardown_after) <= new Date())) {
+    console.log(`  note: not due for teardown yet (teardown after ${signup.teardown_after ? new Date(signup.teardown_after).toISOString() : "—"}); showing what "Delete now" would remove.`);
+  }
+  const log = (m) => console.log(`  ${m}`);
+  const store = readOnlyStore(pg, log, { simulateRemoving: true });
+  const deps = dryRunDeps(liveDeps(), log);
+  try {
+    await runTeardownJob({ job: { id: null, signup_id: signup.id, state: {} }, store, deps, config: { ...config, dryRun: true } });
+  } catch (err) {
+    console.log(`  stopped: ${err.message}`);
+  }
+  await pg.end();
+} else if (cmd === "sweep") {
+  need(config.hqDatabaseUrl, "HQ_DATABASE_URL is required");
+  const store = createPgStore({ connectionString: config.hqDatabaseUrl });
+  await store.ensureSchema();
+  console.log(JSON.stringify(await runLifecycleSweep({ store, config })));
+  await store.end();
+} else if (cmd === "run" || cmd === "once") {
   assertLiveConfig(config);
   const store = createPgStore({ connectionString: config.hqDatabaseUrl });
   await store.ensureSchema();
-  const deps = {
-    railway: createRailwayClient(config.railway),
-    cloudflare: createCloudflareClient(config.cloudflare),
-    tenantDb: createTenantDb({ adminUrl: config.tenantDb.adminUrl }),
-    httpStatus, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
-  };
+  const deps = liveDeps();
   const resend = config.email.enabled && config.email.resendApiKey ? createResendClient({ apiKey: config.email.resendApiKey }) : null;
   if (cmd === "once") {
     console.log(await workOnce({ store, deps, config }));
@@ -75,7 +141,7 @@ if (cmd === "run" || cmd === "once") {
     await runForever({ store, deps, resend, config, signal: ac.signal });
     await store.end();
   }
-} else if (cmd !== "dry-run") {
-  console.log("usage: node src/cli.js run | once | dry-run <signupId>");
+} else {
+  console.log("usage: node src/cli.js run | once | sweep | plan | dry-run <signupId> | teardown-plan <signupId>   (DRY_RUN=1: read-only)");
   process.exit(cmd ? 2 : 0);
 }

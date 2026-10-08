@@ -34,6 +34,40 @@ export function createTenantDb({ adminUrl, ClientImpl = pg.Client }) {
         return created;
       });
     },
+
+    /** Read-only: does the club database / role exist? (dry runs and teardown logging) */
+    async inspect({ dbName, roleName }) {
+      return withClient(async (c) => ({
+        database: (await c.query("SELECT 1 FROM pg_database WHERE datname = $1", [dbName])).rowCount > 0,
+        role: (await c.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [roleName])).rowCount > 0,
+      }));
+    },
+
+    /**
+     * Teardown. Idempotent: returns what was actually dropped in this call.
+     * Only ever touches HQ-named club databases (club_<slug> owned by club_<slug>_app).
+     */
+    async dropDatabase({ dbName, roleName }) {
+      if (!IDENT_RE.test(dbName) || !IDENT_RE.test(roleName)) throw new Error(`Unsafe identifier ${dbName}/${roleName}`);
+      if (!dbName.startsWith("club_") || roleName !== `${dbName}_app`) throw new Error(`Refusing to drop ${dbName}/${roleName}: not an HQ club database`);
+      return withClient(async (c) => {
+        const db = await c.query("SELECT pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname = $1", [dbName]);
+        if (db.rowCount && db.rows[0].owner !== roleName) {
+          throw new Error(`Refusing to drop ${dbName}: owned by ${db.rows[0].owner}, not ${roleName}`);
+        }
+        let droppedDb = false, droppedRole = false;
+        if (db.rowCount) {
+          await c.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
+          droppedDb = true;
+        }
+        const role = await c.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [roleName]);
+        if (role.rowCount) {
+          await c.query(`DROP ROLE IF EXISTS "${roleName}"`);
+          droppedRole = true;
+        }
+        return { droppedDb, droppedRole };
+      });
+    },
   };
 }
 

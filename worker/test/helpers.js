@@ -58,7 +58,8 @@ export function testConfig(overrides = {}) {
   return {
     workerId: "test-worker",
     workerSecret: "test-secret-test-secret-test-secret-0123",
-    trialDays: 14,
+    trialDays: 7,
+    lifecycle: { enabled: true, sweepIntervalMs: 0, graceDays: 7, reminderDays: [2, 1], teardownEnabled: true },
     baseDomain: "clubhonbu.co.uk",
     railway: { projectId: "proj_tenants", environmentId: "env_prod", region: "europe-west4-drams3a", sleepApplication: true,
       sourceRepo: "anthonieveritt-afk/club-honbu", sourceBranch: "feat/trial-instance", sourceImage: "", appPort: 8080 },
@@ -66,6 +67,7 @@ export function testConfig(overrides = {}) {
     health: { deployTimeoutMs: 1000, healthTimeoutMs: 1000, customDomainTimeoutMs: 100, intervalMs: 0 },
     email: { enabled: false, from: "Club Honbu <hello@clubhonbu.co.uk>", replyTo: "hello@clubhonbu.co.uk" },
     trialUpgradeUrl: "",
+    contactEmail: "hello@clubhonbu.co.uk",
     ...overrides,
   };
 }

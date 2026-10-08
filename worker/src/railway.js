@@ -147,5 +147,46 @@ export function createRailwayClient({ apiUrl, token, fetchImpl = fetch, timeoutM
       const d = await gql(`query($id: String!) { deployment(id: $id) { id status } }`, { id });
       return d.deployment;
     },
+
+    // ── trial lifecycle (extend / convert / teardown) ──
+    // Signatures checked against the live schema via introspection (no token used).
+
+    /** Current service variables as a plain object (values are rendered). */
+    async getVariables({ projectId, environmentId, serviceId }) {
+      const d = await gql(
+        `query($projectId: String!, $environmentId: String!, $serviceId: String) {
+           variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }`,
+        { projectId, environmentId, serviceId }
+      );
+      return d.variables || {};
+    },
+
+    async deleteVariable({ projectId, environmentId, serviceId, name }) {
+      await gql(
+        `mutation($input: VariableDeleteInput!) { variableDelete(input: $input) }`,
+        { input: { projectId, environmentId, serviceId, name } }
+      );
+    },
+
+    /** Restarts the latest deployment with the current variables (no rebuild). */
+    async redeploy({ serviceId, environmentId }) {
+      await gql(
+        `mutation($serviceId: String!, $environmentId: String!) {
+           serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId) }`,
+        { serviceId, environmentId }
+      );
+    },
+
+    async deleteCustomDomain(id) {
+      await gql(`mutation($id: String!) { customDomainDelete(id: $id) }`, { id });
+    },
+
+    /** Deletes the service (and its deployments/service domains) from the tenant environment. */
+    async deleteService({ id, environmentId }) {
+      await gql(
+        `mutation($id: String!, $environmentId: String) { serviceDelete(id: $id, environmentId: $environmentId) }`,
+        { id, environmentId }
+      );
+    },
   };
 }

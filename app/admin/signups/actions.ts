@@ -4,7 +4,7 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { isAdminAuthorized } from "@/lib/admin-auth";
-import { approveSignup, rejectSignup, retryJob, type ActionResult } from "@/lib/signups";
+import { approveSignup, rejectSignup, retryJob, extendTrial, markConverted, deleteNow, type ActionResult } from "@/lib/signups";
 
 // Server actions POST to /admin/signups, so middleware's Basic auth applies; re-checked here anyway.
 function requireAdmin() {
@@ -38,5 +38,18 @@ export async function rejectAction(formData: FormData) {
 }
 
 export async function retryAction(formData: FormData) {
-  await run(() => retryJob(String(formData.get("id") || "")));
+  const kind = String(formData.get("kind") || "provision") as "provision" | "teardown" | "sync_trial";
+  await run(() => retryJob(String(formData.get("id") || ""), kind));
+}
+
+export async function extendAction(formData: FormData) {
+  await run(() => extendTrial(String(formData.get("id") || ""), String(formData.get("days") || "")));
+}
+
+export async function convertAction(formData: FormData) {
+  await run(() => markConverted(String(formData.get("id") || "")));
+}
+
+export async function deleteNowAction(formData: FormData) {
+  await run(() => deleteNow(String(formData.get("id") || ""), String(formData.get("confirm") || "")));
 }

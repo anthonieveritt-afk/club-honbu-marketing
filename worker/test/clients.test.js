@@ -77,3 +77,32 @@ test("slugs and club types", () => {
   assert.equal(clubTypeFor("Martial Arts"), "martial_arts");
   assert.equal(clubTypeFor("Unknown"), "general");
 });
+
+test("railway client: lifecycle mutations (variables, redeploy, delete domain/service) match the schema", async () => {
+  const f = mockFetch([
+    { body: { data: { variables: { TRIAL_ENDS_AT: "2026-10-15T09:00:00.000Z" } } } },
+    { body: { data: { variableDelete: true } } },
+    { body: { data: { serviceInstanceRedeploy: true } } },
+    { body: { data: { customDomainDelete: true } } },
+    { body: { data: { serviceDelete: true } } },
+  ]);
+  const rw = createRailwayClient({ apiUrl: "https://railway.test/graphql/v2", token: "tok", fetchImpl: f });
+  assert.deepEqual(await rw.getVariables({ projectId: "p", environmentId: "e", serviceId: "s" }), { TRIAL_ENDS_AT: "2026-10-15T09:00:00.000Z" });
+  assert.match(f.calls[0].body.query, /variables\(projectId: \$projectId, environmentId: \$environmentId, serviceId: \$serviceId\)/);
+  await rw.deleteVariable({ projectId: "p", environmentId: "e", serviceId: "s", name: "TRIAL_ENDS_AT" });
+  assert.deepEqual(f.calls[1].body.variables.input, { projectId: "p", environmentId: "e", serviceId: "s", name: "TRIAL_ENDS_AT" });
+  await rw.redeploy({ serviceId: "s", environmentId: "e" });
+  assert.match(f.calls[2].body.query, /serviceInstanceRedeploy\(serviceId: \$serviceId, environmentId: \$environmentId\)/);
+  await rw.deleteCustomDomain("cd_1");
+  assert.deepEqual(f.calls[3].body.variables, { id: "cd_1" });
+  await rw.deleteService({ id: "s", environmentId: "e" });
+  assert.match(f.calls[4].body.query, /serviceDelete\(id: \$id, environmentId: \$environmentId\)/);
+});
+
+test("cloudflare client: deleteRecord is a zone-scoped DELETE", async () => {
+  const f = mockFetch([{ body: { success: true, result: { id: "r1" } } }]);
+  const cf = createCloudflareClient({ apiUrl: "https://cf.test/client/v4", token: "cft", zoneId: "z1", fetchImpl: f });
+  await cf.deleteRecord("r1");
+  assert.equal(f.calls[0].url, "https://cf.test/client/v4/zones/z1/dns_records/r1");
+  assert.equal(f.calls[0].init.method, "DELETE");
+});

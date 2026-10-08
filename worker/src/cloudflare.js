@@ -39,5 +39,8 @@ export function createCloudflareClient({ apiUrl, token, zoneId, fetchImpl = fetc
     async updateRecord(id, record) {
       return call("PATCH", `/dns_records/${id}`, record);
     },
+    async deleteRecord(id) {
+      return call("DELETE", `/dns_records/${id}`);
+    },
   };
 }
