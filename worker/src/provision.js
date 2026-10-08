@@ -63,8 +63,11 @@ function desiredDnsRecords({ status, state, config }) {
     add(type, name, r.requiredValue);
   }
   if (status?.verificationToken) {
-    let host = status.verificationDnsHost || `_railway-verify.${state.slug}`;
-    if (!host.endsWith(zone)) host = `${host.replace(/\.$/, "")}.${zone}`;
+    // Railway gives verificationDnsHost relative to the registrable zone (e.g. "_railway-verify.slug.staging"
+    // in "clubhonbu.co.uk"), which differs from BASE_DOMAIN when that is a subdomain (staging).
+    const apex = (status.dnsRecords || []).find((r) => r.zone)?.zone?.replace(/\.$/, "") || zone;
+    let host = (status.verificationDnsHost || `_railway-verify.${state.fqdn}`).replace(/\.$/, "");
+    if (!(host === zone || host.endsWith(`.${zone}`) || host === apex || host.endsWith(`.${apex}`))) host = `${host}.${apex}`;
     const v = status.verificationToken.startsWith("railway-verify=") ? status.verificationToken : `railway-verify=${status.verificationToken}`;
     add("TXT", host, v);
   }

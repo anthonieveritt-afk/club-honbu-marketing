@@ -206,3 +206,11 @@ test("welcome email is only sent when WELCOME_EMAIL_ENABLED, once, with an idemp
   assert.match(sent[0].idempotencyKey, /^outbound-email-\d+$/);
   assert.equal((await one("SELECT count(*)::int n FROM outbound_emails WHERE status='sent' AND provider_id IS NOT NULL")).n, queued);
 });
+
+test("BASE_DOMAIN on a subdomain (staging): Railway's zone-relative verify host is not doubled", async () => {
+  await approvedSignup(env.db, { slug: "stage-dojo", club: "Stage Dojo", email: "stage@example.com" });
+  const d = deps();
+  assert.equal(await workOnce({ store: env.store, deps: d, config: testConfig({ baseDomain: "staging.clubhonbu.co.uk" }), log: quiet }), "succeeded");
+  const recs = d.cloudflare._s.records.map((r) => `${r.type} ${r.name}`).sort();
+  assert.deepEqual(recs, ["CNAME stage-dojo.staging.clubhonbu.co.uk", "TXT _railway-verify.stage-dojo.staging.clubhonbu.co.uk"]);
+});

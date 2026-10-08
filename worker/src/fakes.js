@@ -71,7 +71,11 @@ export function createFakeRailway({ fail, deployOutcome = ["BUILDING", "DEPLOYIN
     async getCustomDomainStatus({ id: cid }) {
       call("getCustomDomainStatus", { id: cid });
       const d = s.customDomains.find((x) => x.id === cid);
-      const [host, ...zone] = d.domain.split(".");
+      // Like Railway: hostlabel / verificationDnsHost are relative to the registrable zone (apex),
+      // e.g. "slug.staging" in zone "clubhonbu.co.uk" for slug.staging.clubhonbu.co.uk.
+      const apex = d.domain.endsWith(".clubhonbu.co.uk") ? "clubhonbu.co.uk" : d.domain.split(".").slice(1).join(".");
+      const host = d.domain.slice(0, -(apex.length + 1));
+      const zone = [apex];
       return {
         id: d.id, domain: d.domain,
         status: {
