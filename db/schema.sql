@@ -176,3 +176,35 @@ BEGIN
   END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS club_signups_verify_idx ON club_signups (verify_expires_at) WHERE status = 'pending_verification';
+
+-- ── Stripe Billing (test mode first): paid clubs + webhook idempotency ─────────────────────────
+-- A paid club is status 'converted' (never torn down) with billing_status 'active'.
+-- billing_status: active | past_due (payment failed, grace until payment_grace_until) | unpaid | canceled.
+-- Additive and idempotent.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_name = 'club_signups' AND column_name = 'stripe_customer_id') THEN
+    ALTER TABLE club_signups
+      ADD COLUMN stripe_customer_id     TEXT,
+      ADD COLUMN stripe_subscription_id TEXT,
+      ADD COLUMN billing_status         TEXT,
+      ADD COLUMN billing_plan           TEXT,         -- starter | club | association
+      ADD COLUMN billing_interval       TEXT,         -- month | year
+      ADD COLUMN current_period_end     TIMESTAMPTZ,
+      ADD COLUMN paid_at                TIMESTAMPTZ,  -- first successful payment
+      ADD COLUMN payment_failed_at      TIMESTAMPTZ,
+      ADD COLUMN payment_grace_until    TIMESTAMPTZ;  -- past_due clubs are locked after this
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS club_signups_stripe_sub_idx ON club_signups (stripe_subscription_id) WHERE stripe_subscription_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS club_signups_stripe_cust_idx ON club_signups (stripe_customer_id) WHERE stripe_customer_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS stripe_events (            -- each webhook event is applied once
+  id           TEXT PRIMARY KEY,                      -- evt_...
+  type         TEXT NOT NULL,
+  received_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  processed_at TIMESTAMPTZ,
+  outcome      TEXT,
+  signup_id    BIGINT REFERENCES club_signups(id) ON DELETE SET NULL
+);

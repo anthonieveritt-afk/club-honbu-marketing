@@ -1,3 +1,5 @@
+import { billingConfig } from "./billing.js";
+
 // All configuration comes from env. Nothing here talks to any service.
 export function loadConfig(env = process.env) {
   const num = (v, d) => (v === undefined || v === "" ? d : Number(v));
@@ -59,6 +61,8 @@ export function loadConfig(env = process.env) {
       replyTo: env.EMAIL_REPLY_TO || "hello@clubhonbu.co.uk",
     },
     trialUpgradeUrl: env.TRIAL_UPGRADE_URL || "",
+    // Stripe Billing: per-club signed /subscribe links need BILLING_TOKEN_SECRET (same value as the site).
+    billing: billingConfig(env),
     contactEmail: env.TRIAL_CONTACT_EMAIL || "hello@clubhonbu.co.uk",
   };
 }
