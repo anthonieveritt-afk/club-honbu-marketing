@@ -59,7 +59,7 @@ ${paras.map((p) => `<p>${p.html ?? esc(p)}</p>`).join("\n")}
 
 function upgradeLine({ upgradeUrl, contactEmail }) {
   return upgradeUrl
-    ? { text: `Upgrade here: ${upgradeUrl}`, html: `<a href="${esc(upgradeUrl)}" style="color:#0066cc">Upgrade here</a>` }
+    ? { text: `Subscribe to keep your club: ${upgradeUrl}`, html: `<a href="${esc(upgradeUrl)}" style="display:inline-block;background:#0A0A0A;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600">Subscribe</a>` }
     : { text: `To keep using Club Honbu, just reply to this email (or write to ${contactEmail}).`, html: `To keep using Club Honbu, just reply to this email (or write to ${esc(contactEmail)}).` };
 }
 

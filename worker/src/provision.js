@@ -1,3 +1,4 @@
+import { subscribeUrl } from "./billing.js";
 // Approved sign-up -> running club instance. Idempotent and resumable:
 // every step records what it created in job.state and checks for existing resources
 // (by deterministic names) before creating anything, so re-running a job — after a crash,
@@ -7,6 +8,11 @@ import { isValidSlug, clubTypeFor } from "./slug.js";
 import { tenantDatabaseUrl } from "./tenant-db.js";
 import { pollUntil } from "./http.js";
 import { welcomeEmail } from "./email.js";
+
+/** The locked page / banner "Upgrade" link: this club's signed /subscribe page, else TRIAL_UPGRADE_URL. */
+export function clubUpgradeUrl(config, signupId) {
+  return (config.billing && subscribeUrl(config.billing, signupId)) || config.trialUpgradeUrl || "";
+}
 
 export class PermanentError extends Error {
   constructor(message) { super(message); this.name = "PermanentError"; this.retryable = false; }
@@ -44,7 +50,7 @@ export function clubVariables({ signup, state, config }) {
     ...(config.lifecycle ? { TRIAL_GRACE_DAYS: String(config.lifecycle.graceDays) } : {}),
     ...(config.contactEmail ? { TRIAL_CONTACT_EMAIL: config.contactEmail } : {}),
     SITE_URL: `https://${fqdn}`,
-    ...(config.trialUpgradeUrl ? { TRIAL_UPGRADE_URL: config.trialUpgradeUrl } : {}),
+    ...(clubUpgradeUrl(config, signup.id) ? { TRIAL_UPGRADE_URL: clubUpgradeUrl(config, signup.id) } : {}),
   };
 }
 

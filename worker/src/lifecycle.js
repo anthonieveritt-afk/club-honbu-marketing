@@ -13,7 +13,8 @@
 //
 // Everything is idempotent (deterministic names, look-before-create/delete, per-step progress in
 // provisioning_jobs.state) and every action is written to provisioning_events.
-import { namesFor, PermanentError, HQ_DNS_COMMENT } from "./provision.js";
+import { namesFor, PermanentError, HQ_DNS_COMMENT, clubUpgradeUrl } from "./provision.js";
+import { sweepPaymentGrace } from "./billing.js";
 import { isValidSlug } from "./slug.js";
 import { reminderEmail, expiredEmail, removedEmail } from "./email.js";
 
@@ -71,7 +72,7 @@ export async function runLifecycleSweep({ store, config, now = Date.now(), log =
       const d = dueReminder({ trialEndsAt: s.trial_ends_at, now, reminderDays: lc.reminderDays });
       if (!d) continue;
       const kind = `trial_reminder_${d}d:${iso(s.trial_ends_at)}`;
-      const mail = reminderEmail({ contactName: s.contact_name, clubName: s.club_name, instanceUrl: s.instance_url, trialEndsAt: s.trial_ends_at, daysLeft: d, ...mailCtx });
+      const mail = reminderEmail({ contactName: s.contact_name, clubName: s.club_name, instanceUrl: s.instance_url, trialEndsAt: s.trial_ends_at, daysLeft: d, ...mailCtx, upgradeUrl: clubUpgradeUrl(config, s.id) });
       if (await store.queueEmail({ signupId: s.id, kind, to: s.email, ...mail })) {
         out.reminders++;
         await ev(s.id, "reminder", `Queued ${d}-day trial reminder (trial ends ${iso(s.trial_ends_at)})`);
@@ -91,8 +92,14 @@ export async function runLifecycleSweep({ store, config, now = Date.now(), log =
   for (const s of await store.expireDueTrials(now, lc.graceDays)) {
     out.expired++;
     await ev(s.id, "expire", `Trial ended ${iso(s.trial_ends_at)}; club is read-only. Teardown scheduled after ${iso(s.teardown_after)}`);
-    const mail = expiredEmail({ contactName: s.contact_name, clubName: s.club_name, trialEndsAt: s.trial_ends_at, teardownAfter: s.teardown_after, ...mailCtx });
+    const mail = expiredEmail({ contactName: s.contact_name, clubName: s.club_name, trialEndsAt: s.trial_ends_at, teardownAfter: s.teardown_after, ...mailCtx, upgradeUrl: clubUpgradeUrl(config, s.id) });
     await store.queueEmail({ signupId: s.id, kind: `trial_expired:${iso(s.trial_ends_at)}`, to: s.email, ...mail });
+  }
+
+  // 2b. paid clubs whose failed-payment grace ran out -> locked, back on the expiry/teardown path
+  if (store.db && config.billing) {
+    const n = await sweepPaymentGrace({ db: store.db, cfg: config.billing, now, retentionDays: lc.graceDays });
+    if (n) out.paymentLapsed = n;
   }
 
   // 3. grace over -> queue teardown (the job re-checks everything before deleting anything)
@@ -105,7 +112,7 @@ export async function runLifecycleSweep({ store, config, now = Date.now(), log =
       }
     }
   }
-  if (out.reminders || out.expired || out.teardownsQueued || out.unconfirmedExpired) log(`[lifecycle] ${JSON.stringify(out)}`);
+  if (out.reminders || out.expired || out.teardownsQueued || out.unconfirmedExpired || out.paymentLapsed) log(`[lifecycle] ${JSON.stringify(out)}`);
   return out;
 }
 
@@ -241,7 +248,8 @@ const syncSteps = {
       if (s.converted_at || s.status === "converted") {
         desired = { remove: LIFECYCLE_VARS.filter((k) => k in current), set: {} };
       } else if (["trial_active", "expired"].includes(s.status) && s.trial_ends_at) {
-        const want = { TRIAL_ENDS_AT: iso(s.trial_ends_at), TRIAL_GRACE_DAYS: String(config.lifecycle.graceDays) };
+        const upgrade = clubUpgradeUrl(config, s.id);
+        const want = { TRIAL_ENDS_AT: iso(s.trial_ends_at), TRIAL_GRACE_DAYS: String(config.lifecycle.graceDays), ...(upgrade ? { TRIAL_UPGRADE_URL: upgrade } : {}) };
         const set = Object.fromEntries(Object.entries(want).filter(([k, v]) => current[k] !== v));
         desired = { remove: "CLUB_SUSPENDED" in current ? ["CLUB_SUSPENDED"] : [], set };
       } else {
