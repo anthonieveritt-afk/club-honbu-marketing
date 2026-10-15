@@ -75,7 +75,7 @@ export default function GetStartedPage() {
           {/* Hero */}
           <div className="text-center max-w-2xl mx-auto mb-14">
             <p className="text-sm text-accent font-medium tracking-wide mb-5">
-              Free 14-day trial · No card required
+              Free 7-day trial · No card required
             </p>
             <h1 className="text-4xl md:text-5xl lg:text-6xl font-semibold tracking-tight leading-[1.05]">
               Get started with Club&nbsp;Honbu
@@ -292,7 +292,7 @@ export default function GetStartedPage() {
                       {isPending ? "Submitting…" : "Request my account →"}
                     </button>
                     <p className="mt-3 text-center text-sm text-muted">
-                      14-day free trial · No card required · Cancel anytime
+                      7-day free trial · No card required · Cancel anytime
                     </p>
                     <p className="mt-3 text-center text-xs text-muted">
                       We use these details only to set up your Club Honbu account and contact you
