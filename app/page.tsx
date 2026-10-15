@@ -20,14 +20,14 @@ export default function Home() {
           </p>
           <div className="mt-10 flex flex-wrap items-center gap-5">
             <a href="/get-started" className="btn-accent px-7 py-3.5 text-base">
-              Start your 14-day free trial
+              Start your 7-day free trial
             </a>
             <a href="#features" className="text-base text-ink/80 hover:text-ink underline-offset-4 hover:underline">
               See how it works →
             </a>
           </div>
           <p className="mt-8 text-sm text-muted">
-            14-day free trial · No card required · Cancel anytime
+            7-day free trial · No card required · Cancel anytime
           </p>
         </section>
 
@@ -108,7 +108,7 @@ export default function Home() {
             Simple pricing. Same trial for everyone.
           </h2>
           <p className="mt-6 text-lg text-muted max-w-xl">
-            14 days free. No card required. Pick a plan when (and if) you're ready.
+            7 days free. No card required. Pick a plan when (and if) you're ready.
           </p>
 
           <div className="mt-14 grid md:grid-cols-3 gap-6">
@@ -188,7 +188,7 @@ export default function Home() {
                   {tier.cta}
                 </a>
                 <p className={`mt-3 text-xs ${tier.highlight ? "text-canvas/55" : "text-muted"}`}>
-                  14-day free trial · No card required
+                  7-day free trial · No card required
                 </p>
               </div>
             ))}
@@ -238,14 +238,14 @@ export default function Home() {
               Get your evenings back.
             </h2>
             <p className="mt-6 text-lg md:text-xl text-canvas/70 max-w-xl mx-auto">
-              Try Club Honbu free for 14 days. No card. No commitment. Just your club — dojo, pitch or otherwise — finally on rails.
+              Try Club Honbu free for 7 days. No card. No commitment. Just your club — dojo, pitch or otherwise — finally on rails.
             </p>
             <div className="mt-10 flex flex-wrap items-center justify-center gap-5">
               <a
                 href="/get-started"
                 className="btn-pill bg-accent text-white hover:bg-accent/90 px-7 py-3.5 text-base"
               >
-                Start your 14-day free trial
+                Start your 7-day free trial
               </a>
               <a
                 href="mailto:hello@clubhonbu.co.uk"
